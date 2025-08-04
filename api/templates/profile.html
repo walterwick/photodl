@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Instagram Profil Bilgileri</title>
+</head>
+<body>
+  <h1>Instagram Profil Bilgileri</h1>
+
+  {% if profile_data %}
+    <h2>Kullanıcı Adı: {{ profile_data.username }}</h2>
+    <p>Gönderi Sayısı: {{ profile_data.post_count }}</p>
+    <p>Takipçi Sayısı: {{ profile_data.followers }}</p>
+    <p>Takip Edilen: {{ profile_data.followees }}</p>
+    <p>Biyografi: {{ profile_data.bio }}</p>
+    <p>Tam Ad: {{ profile_data.full_name }}</p>
+    <img crossorigin='anonymous' src="{{ profile_data.profile_pic_url  }}" height="190px" alt="Profil Resmi">
+    <a href="{{ profile_data.profile_pic_url  }}">pfp</a>
+
+{% else %}
+    <p>Kullanıcı bulunamadı.</p>
+  {% endif %}
+</body>
+</html>
