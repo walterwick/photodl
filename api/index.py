@@ -1,216 +1,132 @@
-import os
+from flask import Flask, request, render_template_string, jsonify, redirect, url_for
 import subprocess
-from flask import Flask, request, redirect, send_from_directory
+import json
+import base64
+import requests
+import tempfile
+import os
 
 app = Flask(__name__)
 
-AVATAR_DIR = os.path.join(os.path.dirname(__file__), 'avatars')
-os.makedirs(AVATAR_DIR, exist_ok=True)
-
-COOKIE_FILE = 'cookies.txt'
-COOKIE_CONTENT = """# Netscape HTTP Cookie File
-
-.instagram.com	TRUE	/	TRUE	1789062185	csrftoken	2053d62e31aa1c89d75cf4f5300022c0
-.instagram.com	TRUE	/	TRUE	1787118016	datr	wOl1aMfDmY6zt8HtAyaeaibd
-.instagram.com	TRUE	/	TRUE	1784094016	ig_did	BB71273F-1D11-4D30-AF50-FE1C50DBE6EE
-.instagram.com	TRUE	/	TRUE	1754743831	wd	1549x739
-.instagram.com	TRUE	/	TRUE	1787651229	mid	aH4MnAALAAFRZVkEINKxhkFSiDj1
-.instagram.com	TRUE	/	TRUE	1785084253	ig_nrcb	1
-.instagram.com	TRUE	/	TRUE	1785674903	sessionid	75960500904%3AUMBRcC2W2hClMz%3A26%3AAYclgNCdkQsuDof2ScDp7TWZ3ahRiErwS4fU3YgsOg
-.instagram.com	TRUE	/	TRUE	1762278185	ds_user_id	75960500904
-.instagram.com	TRUE	/	TRUE	0	rur	"CLN\\05475960500904\\0541786038186:01fea25a7f508bb38553049b45e143c87dbf6c8cd5d51e8056318983866f6edc8ee1c095"
-.instagram.com	TRUE	/	TRUE	1788698985	ps_l	1
-.instagram.com	TRUE	/	TRUE	1788698985	ps_n	1
+# Cookies içeriğini doğrudan koda gömüyoruz
+COOKIES_CONTENT = """\
+.instagram.com	TRUE	/	TRUE	1789642815	csrftoken	1FXuJev8Ddd5jExWa-GiuT
+.instagram.com	TRUE	/	TRUE	1789578029	datr	LHObaEi5RirKmPcuuCNKYhgK
+.instagram.com	TRUE	/	TRUE	1786554165	ig_did	1BB2A60D-0329-4D40-BE8E-6C0B84A6CB03
+.instagram.com	TRUE	/	TRUE	1755687611	wd	1549x739
+.instagram.com	TRUE	/	TRUE	1789578030	mid	aJtzLAALAAH8M0ZZrDqepfdJfeyd
+.instagram.com	TRUE	/	TRUE	1786554039	ig_nrcb	1
+.instagram.com	TRUE	/	TRUE	1786618793	sessionid	75960500904%3A3YweVf7NJu2Pyl%3A7%3AAYcZ1UQYyvPH1WXdZtYWeyalj4UWwC3crxYvs0wJ8Q
+.instagram.com	TRUE	/	TRUE	1762858815	ds_user_id	75960500904
+.instagram.com	TRUE	/	TRUE	1789642794	ps_l	1
+.instagram.com	TRUE	/	TRUE	1789642794	ps_n	1
+.instagram.com	TRUE	/	TRUE	0	rur	"CLN\05475960500904\0541786618817:01fefe6514d2fc4d8043d9c73a456efeb116896afe572cf37c7a7358b9e893f35742271e"
 """
 
-with open(COOKIE_FILE, 'w') as f:
-    f.write(COOKIE_CONTENT)
-
-HTML_CONTENT = """
+HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="en">
+<html lang="tr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Instagram Avatar Fetcher</title>
+    <title>Instagram Bilgileri</title>
+      <link rel="shortcut icon" href="data:image/jpeg;base64,{{ data.image_base64 }}" type="image/x-icon">
+
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            background-color: #f4f4f4;
-            margin: 0;
-            padding: 0;
-        }
-
-        .container {
-            max-width: 400px;
-            margin: 50px auto;
-            padding: 20px;
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
-        }
-
-        h1 {
-            text-align: center;
-            color: #333;
-        }
-
-        form {
-            display: flex;
-            flex-direction: column;
-        }
-
-        label {
-            margin-bottom: 5px;
-            color: #555;
-        }
-
-        input {
-            padding: 10px;
-            margin-bottom: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-
-        button {
-            padding: 10px;
-            background: #3897f0;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-        }
-
-        button:hover {
-            background: #287acc;
-        }
-
-        p {
-            text-align: center;
-            color: #777;
-            font-size: 0.9em;
-        }
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        img { max-width: 200px; display: block; margin-bottom: 5px; }
+        .container { max-width: 500px; margin: auto; }
+        .img-link { font-size: 14px; word-break: break-all; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Instagram Profile Picture Fetcher</h1>
-        <form action="/fetch" method="post">
-            <label for="username">Instagram Username:</label>
-            <input type="text" id="username" name="username" required>
-            <button type="submit">Fetch</button>
+        <h2>Instagram Kullanıcı Bilgileri</h2>
+        <form method="GET">
+            <input type="text" name="username" value="{{ username }}" placeholder="Kullanıcı adı">
+            <button type="submit">Getir</button>
         </form>
-        <p>After fetching, the profile picture will be displayed here. You can right-click to download or open the link in a new tab.</p>
+        {% if error %}
+            <p style="color:red;">{{ error }}</p>
+        {% elif data %}
+            <h3>@{{ data.username }}</h3>
+            <img src="data:image/jpeg;base64,{{ data.image_base64 }}" alt="Profil Fotoğrafı">
+            <p class="img-link"><a href="{{ data.display_url }}" target="_blank">link</a></p>
+            <p><b>Biyografi:</b> {{ data.biography }}</p>
+            <p><b>Takipçi:</b> {{ data.followers }}</p>
+            <p><b>Takip:</b> {{ data.following }}</p>
+        {% endif %}
     </div>
 </body>
 </html>
 """
 
-RESULT_HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Instagram Avatar - {username}</title>
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            background-color: #f4f4f4;
-            margin: 0;
-            padding: 0;
-        }}
-
-        .container {{
-            max-width: 600px;
-            margin: 50px auto;
-            padding: 20px;
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
-            text-align: center;
-        }}
-
-        h1 {{
-            color: #333;
-        }}
-
-        img {{
-            max-width: 100%;
-            height: auto;
-            border-radius: 50%;
-            margin-bottom: 20px;
-        }}
-
-        a {{
-            display: inline-block;
-            padding: 10px 20px;
-            background: #3897f0;
-            color: white;
-            text-decoration: none;
-            border-radius: 4px;
-        }}
-
-        a:hover {{
-            background: #287acc;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Profile Picture for @{username}</h1>
-        <img src="{avatar_url}" alt="Profile Picture">
-        <a href="{avatar_url}" target="_blank">Open in New Tab</a>
-        <p><a href="/">Fetch Another</a></p>
-    </div>
-</body>
-</html>
-"""
-
-@app.route('/')
+@app.route("/", methods=["GET"])
 def index():
-    return HTML_CONTENT
+    username = request.args.get("username")
+    output_format = request.args.get("format", "html").lower()
 
-def download_avatar(username):
-    avatar_filename = f'{username}.jpg'
-    avatar_path = os.path.join(AVATAR_DIR, avatar_filename)
-
-    if not os.path.exists(avatar_path):
-        try:
-            subprocess.check_call([
-                'gallery-dl',
-                f'https://www.instagram.com/{username}/avatar/',
-                '--directory', AVATAR_DIR,
-                '--filename', '{username}.{extension}',
-                '--cookies', COOKIE_FILE
-            ])
-        except subprocess.CalledProcessError:
-            return False
-
-    return os.path.exists(avatar_path)
-
-@app.route('/fetch', methods=['POST'])
-def fetch():
-    username = request.form['username'].strip().lower()
+    # Eğer username yoksa otomatik olarak varsayılan kullanıcıya yönlendir
     if not username:
-        return "Username is required", 400
+        return redirect(url_for('index', username="emineey41"))
 
-    if download_avatar(username):
-        avatar_url = f'/{username}/avatar'
-        return RESULT_HTML_TEMPLATE.format(username=username, avatar_url=avatar_url)
-    else:
-        return "Error downloading avatar. User may not exist or rate limit reached.", 500
+    data = None
+    error = None
 
-@app.route('/<username>/avatar')
-def avatar(username):
-    username = username.lower()
-    avatar_filename = f'{username}.jpg'
-    avatar_path = os.path.join(AVATAR_DIR, avatar_filename)
+    try:
+        # Geçici cookies.txt oluştur
+        with tempfile.NamedTemporaryFile(delete=False, mode="w", encoding="utf-8") as tmp_cookie:
+            tmp_cookie.write(COOKIES_CONTENT)
+            tmp_cookie_path = tmp_cookie.name
 
-    if not os.path.exists(avatar_path):
-        return "Avatar not found", 404
+        # gallery-dl komutunu çalıştır
+        cmd = [
+            "gallery-dl",
+            "--cookies", tmp_cookie_path,
+            "--dump-json",
+            f"https://www.instagram.com/{username}/avatar"
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
 
-    return send_from_directory(AVATAR_DIR, avatar_filename)
+        # Geçici dosyayı sil
+        os.remove(tmp_cookie_path)
 
-if __name__ == '__main__':
+        if result.returncode != 0:
+            error = f"gallery-dl hatası: {result.stderr}"
+        else:
+            try:
+                json_data = json.loads(result.stdout)
+                user_info = json_data[0][1]["user"]
+                display_url = json_data[1][2].get("display_url")
+
+                image_base64 = ""
+                try:
+                    img_resp = requests.get(display_url, timeout=10)
+                    img_resp.raise_for_status()
+                    image_base64 = base64.b64encode(img_resp.content).decode("utf-8")
+                except Exception as e:
+                    error = f"Resim indirilemedi: {e}"
+
+                data = {
+                    "username": user_info["username"],
+                    "biography": user_info.get("biography", ""),
+                    "display_url": display_url,
+                    "image_base64": image_base64,
+                    "followers": user_info.get("count_follow", 0),
+                    "following": user_info.get("count_followed", 0)
+                }
+            except Exception as e:
+                error = f"JSON parse hatası: {e}"
+
+    except Exception as e:
+        error = str(e)
+
+    if output_format == "json":
+        if error:
+            return jsonify({"error": error}), 400
+        return jsonify(data)
+
+    return render_template_string(HTML_TEMPLATE, username=username, data=data, error=error)
+
+if __name__ == "__main__":
     app.run(debug=True)
