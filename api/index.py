@@ -1,151 +1,216 @@
-from flask import Flask, render_template_string, request, jsonify, send_file, flash, redirect, url_for
-import subprocess
 import os
-import tempfile
-from pathlib import Path
+import subprocess
+from flask import Flask, request, redirect, send_from_directory
 
 app = Flask(__name__)
-app.secret_key = 'secret-key'
 
-# HTML Templates (Değişmedi, aynı kalabilir)
-BASE_TEMPLATE = """
+AVATAR_DIR = os.path.join(os.path.dirname(__file__), 'avatars')
+os.makedirs(AVATAR_DIR, exist_ok=True)
+
+COOKIE_FILE = 'cookies.txt'
+COOKIE_CONTENT = """# Netscape HTTP Cookie File
+
+.instagram.com	TRUE	/	TRUE	1789062185	csrftoken	2053d62e31aa1c89d75cf4f5300022c0
+.instagram.com	TRUE	/	TRUE	1787118016	datr	wOl1aMfDmY6zt8HtAyaeaibd
+.instagram.com	TRUE	/	TRUE	1784094016	ig_did	BB71273F-1D11-4D30-AF50-FE1C50DBE6EE
+.instagram.com	TRUE	/	TRUE	1754743831	wd	1549x739
+.instagram.com	TRUE	/	TRUE	1787651229	mid	aH4MnAALAAFRZVkEINKxhkFSiDj1
+.instagram.com	TRUE	/	TRUE	1785084253	ig_nrcb	1
+.instagram.com	TRUE	/	TRUE	1785674903	sessionid	75960500904%3AUMBRcC2W2hClMz%3A26%3AAYclgNCdkQsuDof2ScDp7TWZ3ahRiErwS4fU3YgsOg
+.instagram.com	TRUE	/	TRUE	1762278185	ds_user_id	75960500904
+.instagram.com	TRUE	/	TRUE	0	rur	"CLN\\05475960500904\\0541786038186:01fea25a7f508bb38553049b45e143c87dbf6c8cd5d51e8056318983866f6edc8ee1c095"
+.instagram.com	TRUE	/	TRUE	1788698985	ps_l	1
+.instagram.com	TRUE	/	TRUE	1788698985	ps_n	1
+"""
+
+with open(COOKIE_FILE, 'w') as f:
+    f.write(COOKIE_CONTENT)
+
+HTML_CONTENT = """
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Instagram Avatar İndirici</title>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Instagram Avatar Fetcher</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 400px;
+            margin: 50px auto;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+
+        form {
+            display: flex;
+            flex-direction: column;
+        }
+
+        label {
+            margin-bottom: 5px;
+            color: #555;
+        }
+
+        input {
+            padding: 10px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+
+        button {
+            padding: 10px;
+            background: #3897f0;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #287acc;
+        }
+
+        p {
+            text-align: center;
+            color: #777;
+            font-size: 0.9em;
+        }
+    </style>
 </head>
 <body>
-    <h1>Instagram Avatar İndirici</h1>
-    {% with messages = get_flashed_messages() %}
-        {% if messages %}
-            {% for message in messages %}
-                <p style="color: red;">{{ message }}</p>
-            {% endfor %}
-        {% endif %}
-    {% endwith %}
-    
-    <form method="POST" action="/download">
-        <p>
-            <label>Instagram Kullanıcı Adı:</label><br>
-            <input type="text" name="username" placeholder="kullanici_adi" required>
-        </p>
-        <p>
-            <label>Cookies Dosya Yolu (isteğe bağlı):</label><br>
-            <input type="text" name="cookies_path" placeholder="C:\\Users\\...\\cookies.txt">
-        </p>
-        <p>
-            <button type="submit">Avatar İndir</button>
-        </p>
-    </form>
-    
-    {% if images %}
-        <h2>{{ username }} - Avatar Resimleri</h2>
-        {% for image in images %}
-            <div style="margin: 10px; border: 1px solid #ccc; padding: 10px;">
-                <h3>{{ image.filename }}</h3>
-                <img src="/file/{{ username }}/{{ image.filename }}" width="200" 
-                     style="cursor: pointer;" 
-                     onclick="openImageBlob('{{ username }}', '{{ image.filename }}')">
-                <br><br>
-                <a href="/file/{{ username }}/{{ image.filename }}" download>
-                    <button>İndir</button>
-                </a>
-                <button onclick="openImageBlob('{{ username }}', '{{ image.filename }}')">Yeni Sayfada Görüntüle</button>
-            </div>
-        {% endfor %}
-    {% endif %}
-    
-    <script>
-        function openImageBlob(username, filename) {
-            fetch(`/file/${username}/${filename}`)
-                .then(response => response.blob())
-                .then(blob => {
-                    const blobUrl = URL.createObjectURL(blob);
-                    const newWindow = window.open();
-                    newWindow.document.write(`
-                        <html>
-                            <head>
-                                <title>${filename}</title>
-                                <style>
-                                    body { margin: 0; display: flex; justify-content: center; align-items: center; min-height: 100vh; background: #000; }
-                                    img { max-width: 100vw; max-height: 100vh; object-fit: contain; }
-                                </style>
-                            </head>
-                            <body>
-                                <img src="${blobUrl}" alt="${filename}">
-                            </body>
-                        </html>
-                    `);
-                })
-                .catch(error => {
-                    console.error('Resim yüklenirken hata:', error);
-                    alert('Resim yüklenirken hata oluştu!');
-                });
-        }
-    </script>
+    <div class="container">
+        <h1>Instagram Profile Picture Fetcher</h1>
+        <form action="/fetch" method="post">
+            <label for="username">Instagram Username:</label>
+            <input type="text" id="username" name="username" required>
+            <button type="submit">Fetch</button>
+        </form>
+        <p>After fetching, the profile picture will be displayed here. You can right-click to download or open the link in a new tab.</p>
+    </div>
 </body>
 </html>
 """
 
-def download_avatar(username, cookies_path=None):
-    """Instagram avatar indir"""
-    try:
-        # Geçici dizin kullan
-        temp_dir = tempfile.gettempdir()
-        output_dir = os.path.join(temp_dir, 'downloads', username)
-        os.makedirs(output_dir, exist_ok=True)
-        
-        avatar_url = f"https://www.instagram.com/{username}/avatar"
-        cmd = ['gallery-dl', '-D', output_dir]
-        
-        if cookies_path and os.path.exists(cookies_path):
-            cmd.extend(['--cookies', cookies_path])
-        
-        cmd.append(avatar_url)
-        
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        
-        if result.returncode == 0 and os.path.exists(output_dir):
-            files = list(Path(output_dir).glob('*'))
-            if files:
-                return True, [{'filename': f.name, 'path': str(f)} for f in files]
-        
-        return False, result.stderr
-        
-    except Exception as e:
-        return False, str(e)
+RESULT_HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Instagram Avatar - {username}</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+        }}
+
+        .container {{
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }}
+
+        h1 {{
+            color: #333;
+        }}
+
+        img {{
+            max-width: 100%;
+            height: auto;
+            border-radius: 50%;
+            margin-bottom: 20px;
+        }}
+
+        a {{
+            display: inline-block;
+            padding: 10px 20px;
+            background: #3897f0;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+        }}
+
+        a:hover {{
+            background: #287acc;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Profile Picture for @{username}</h1>
+        <img src="{avatar_url}" alt="Profile Picture">
+        <a href="{avatar_url}" target="_blank">Open in New Tab</a>
+        <p><a href="/">Fetch Another</a></p>
+    </div>
+</body>
+</html>
+"""
 
 @app.route('/')
 def index():
-    return render_template_string(BASE_TEMPLATE)
+    return HTML_CONTENT
 
-@app.route('/download', methods=['POST'])
-def download():
-    username = request.form.get('username', '').strip().lstrip('@')
-    cookies_path = request.form.get('cookies_path', '').strip()
-    
+def download_avatar(username):
+    avatar_filename = f'{username}.jpg'
+    avatar_path = os.path.join(AVATAR_DIR, avatar_filename)
+
+    if not os.path.exists(avatar_path):
+        try:
+            subprocess.check_call([
+                'gallery-dl',
+                f'https://www.instagram.com/{username}/avatar/',
+                '--directory', AVATAR_DIR,
+                '--filename', '{username}.{extension}',
+                '--cookies', COOKIE_FILE
+            ])
+        except subprocess.CalledProcessError:
+            return False
+
+    return os.path.exists(avatar_path)
+
+@app.route('/fetch', methods=['POST'])
+def fetch():
+    username = request.form['username'].strip().lower()
     if not username:
-        flash('Kullanıcı adı gerekli!')
-        return redirect(url_for('index'))
-    
-    success, result = download_avatar(username, cookies_path if cookies_path else None)
-    
-    if success:
-        flash(f'{username} avatarı başarıyla indirildi!')
-        return render_template_string(BASE_TEMPLATE, images=result, username=username)
-    else:
-        flash(f'Hata: {result}')
-        return redirect(url_for('index'))
+        return "Username is required", 400
 
-@app.route('/file/<username>/<filename>')
-def serve_file(username, filename):
-    # Geçici dizinden dosyayı al
-    file_path = os.path.join(tempfile.gettempdir(), 'downloads', username, filename)
-    if os.path.exists(file_path):
-        return send_file(file_path)
-    return "Dosya bulunamadı", 404
+    if download_avatar(username):
+        avatar_url = f'/{username}/avatar'
+        return RESULT_HTML_TEMPLATE.format(username=username, avatar_url=avatar_url)
+    else:
+        return "Error downloading avatar. User may not exist or rate limit reached.", 500
+
+@app.route('/<username>/avatar')
+def avatar(username):
+    username = username.lower()
+    avatar_filename = f'{username}.jpg'
+    avatar_path = os.path.join(AVATAR_DIR, avatar_filename)
+
+    if not os.path.exists(avatar_path):
+        return "Avatar not found", 404
+
+    return send_from_directory(AVATAR_DIR, avatar_filename)
 
 if __name__ == '__main__':
-    print("Sunucu başlatılıyor: http://localhost:5000")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True)
