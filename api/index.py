@@ -19,8 +19,7 @@ s3 = boto3.client(
     region_name='auto'
 )
 
-HTML = """
-<!DOCTYPE html>
+HTML = """<!DOCTYPE html>
 <html lang="tr" data-bs-theme="light">
 <head>
   <meta charset="UTF-8" />
@@ -208,34 +207,19 @@ HTML = """
   </script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
-</html>
-"""
+</html>"""  # Önceki Bootstrap + CSS + modal HTML kodunu buraya aynen koyabilirsin
 
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.avif', '.heic', '.tiff'}
-VIDEO_EXTS = {'.mp4', '.webm', '.mov', '.m4v'}
+
 DOC_ICON_MAP = {
-    '.pdf': 'bi-filetype-pdf',
-    '.txt': 'bi-filetype-txt',
-    '.md': 'bi-markdown',
-    '.csv': 'bi-filetype-csv',
-    '.xls': 'bi-filetype-xls',
-    '.xlsx': 'bi-filetype-xlsx',
-    '.doc': 'bi-filetype-doc',
-    '.docx': 'bi-filetype-docx',
-    '.ppt': 'bi-filetype-ppt',
-    '.pptx': 'bi-filetype-pptx',
-    '.zip': 'bi-file-zip',
-    '.rar': 'bi-file-zip',
-    '.7z':  'bi-file-zip',
-    '.json': 'bi-filetype-json',
-    '.js': 'bi-filetype-js',
-    '.py': 'bi-filetype-py',
-    '.html': 'bi-filetype-html',
+    '.pdf': 'bi-filetype-pdf', '.txt': 'bi-filetype-txt', '.md': 'bi-markdown', '.csv': 'bi-filetype-csv',
+    '.xls': 'bi-filetype-xls', '.xlsx': 'bi-filetype-xlsx', '.doc': 'bi-filetype-doc', '.docx': 'bi-filetype-docx',
+    '.ppt': 'bi-filetype-ppt', '.pptx': 'bi-filetype-pptx', '.zip': 'bi-file-zip', '.rar': 'bi-file-zip',
+    '.7z':  'bi-file-zip', '.json': 'bi-filetype-json', '.js': 'bi-filetype-js', '.html': 'bi-filetype-html',
     '.css': 'bi-filetype-css',
 }
 
 def human_size(n):
-    # B, KB, MB, GB
     step = 1024.0
     if n < step: return f"{n} B"
     n /= step
@@ -250,15 +234,6 @@ def get_ext(name):
     dot = name_low.rfind('.')
     return name_low[dot:] if dot != -1 else ''
 
-@app.route('/')
-def home():
-    return list_objects(prefix='')
-
-@app.route('/folder/<path:folder>')
-def browse_folder(folder):
-    prefix = folder.rstrip('/') + '/'
-    return list_objects(prefix=prefix, current_folder=folder)
-
 def build_breadcrumb(current_folder):
     if not current_folder:
         return []
@@ -270,6 +245,16 @@ def build_breadcrumb(current_folder):
         crumb.append((p, '/'.join(accum)))
     return crumb
 
+@app.route('/')
+def home():
+    return list_objects(prefix='')
+
+@app.route('/folder/<path:folder>')
+def browse_folder(folder):
+    # Unicode klasör isimleri direkt kullanılıyor, unquote yok
+    prefix = folder.rstrip('/') + '/'
+    return list_objects(prefix=prefix, current_folder=folder)
+
 def list_objects(prefix, current_folder=None):
     paginator = s3.get_paginator('list_objects_v2')
     page_iterator = paginator.paginate(Bucket=R2_BUCKET, Prefix=prefix, Delimiter='/')
@@ -278,37 +263,24 @@ def list_objects(prefix, current_folder=None):
     files = []
 
     for page in page_iterator:
-        # Alt klasörler
         for common_prefix in page.get('CommonPrefixes', []):
             folder_name = common_prefix['Prefix'][len(prefix):].rstrip('/')
             if folder_name:
                 folders.append(folder_name)
 
-        # Dosyalar
         for obj in page.get('Contents', []):
             key = obj['Key']
-            if key == prefix:
-                continue  # klasör ismi dosya olarak gelmiş olabilir
+            if key == prefix: continue
             file_name = key[len(prefix):]
-            if '/' in file_name:
-                continue  # alt alt klasör dosyası, göz ardı et
+            if '/' in file_name: continue
 
-            # Presigned URL
             url = s3.generate_presigned_url(
-                'get_object',
-                Params={'Bucket': R2_BUCKET, 'Key': key},
-                ExpiresIn=3600
+                'get_object', Params={'Bucket': R2_BUCKET, 'Key': key}, ExpiresIn=3600
             )
 
             ext = get_ext(file_name)
             is_image = ext in IMAGE_EXTS
-            is_video = ext in VIDEO_EXTS
-            icon = 'bi-file-earmark'
-
-            if is_video:
-                icon = 'bi-filetype-mp4'
-            elif ext in DOC_ICON_MAP:
-                icon = DOC_ICON_MAP[ext]
+            icon = DOC_ICON_MAP.get(ext, 'bi-file-earmark')
 
             files.append({
                 'name': file_name,
