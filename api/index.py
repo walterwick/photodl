@@ -1,14 +1,16 @@
 from flask import Flask, request, render_template_string
 import boto3
+from urllib.parse import unquote
 
-# R2 erişim bilgilerin
+# R2 erişim bilgileri
 AWS_ACCESS_KEY_ID = '112b183cdd116461df8ee2d8a647a58c'
 AWS_SECRET_ACCESS_KEY = 'dd104010783bf0278926182bb9a1d0496c6f62907241d5f196918d7089fe005d'
 R2_BUCKET = 'walter'
 ACCOUNT_ID = '238a54d3f39bc03c25b5550bbd2683ed'
 
-# R2 endpoint URL'si (Cloudflare'dan al)
+# R2 endpoint URL
 R2_ENDPOINT = f'https://{ACCOUNT_ID}.r2.cloudflarestorage.com'
+
 app = Flask(__name__)
 
 s3 = boto3.client(
@@ -19,6 +21,7 @@ s3 = boto3.client(
     region_name='auto'
 )
 
+# --- HTML Template ---
 HTML = """<!DOCTYPE html>
 <html lang="tr" data-bs-theme="light">
 <head>
@@ -32,41 +35,16 @@ HTML = """<!DOCTYPE html>
     .container-narrow { max-width: 1100px; }
     .folder-card { transition: transform .15s ease, box-shadow .15s ease; }
     .folder-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,.08); }
-    .file-grid { 
-      display: grid; 
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); 
-      gap: 16px; 
-    }
-    .file-card { 
-      border: 1px solid rgba(0,0,0,.06); 
-      border-radius: 16px; 
-      background: #fff; 
-      overflow: hidden;
-      box-shadow: 0 2px 12px rgba(0,0,0,.04);
-      transition: transform .15s ease, box-shadow .15s ease;
-    }
+    .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
+    .file-card { border: 1px solid rgba(0,0,0,.06); border-radius: 16px; background: #fff; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,.04); transition: transform .15s ease, box-shadow .15s ease; }
     .file-card:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(0,0,0,.08); }
-    .thumb-wrap {
-      width: 100%;
-      aspect-ratio: 16/10;
-      background: #f0f2f5;
-      display: flex; align-items: center; justify-content: center;
-      overflow: hidden;
-    }
-    .thumb-wrap img {
-      width: 100%; height: 100%; object-fit: cover; display: block;
-    }
+    .thumb-wrap { width: 100%; aspect-ratio: 16/10; background: #f0f2f5; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    .thumb-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
     .file-meta { font-size: .9rem; color: #6b7280; }
     .badge-size { background: #eef2ff; color: #3730a3; }
-    .file-title {
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-      font-weight: 600;
-    }
-    /* Resim olmayan dosyalar için ikon alanı */
+    .file-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
     .thumb-icon { font-size: 2.25rem; color: #94a3b8; }
-    /* BreadCrumb */
     .crumb a { text-decoration: none; }
-    /* Küçük ekranlarda kart içi butonların taşmaması için */
     .btn-wrap { display:flex; gap:.5rem; flex-wrap:wrap; }
   </style>
 </head>
@@ -92,7 +70,7 @@ HTML = """<!DOCTYPE html>
             {% if loop.last %}
               <li class="breadcrumb-item active" aria-current="page">{{ name }}</li>
             {% else %}
-              <li class="breadcrumb-item"><a href="{{ url_for('browse_folder', folder=path) }}">{{ name }}</a></li>
+              <li class="breadcrumb-item"><a href="{{ url_for('browse_folder', folder=path)|safe }}">{{ name }}</a></li>
             {% endif %}
           {% endfor %}
         </ol>
@@ -104,7 +82,7 @@ HTML = """<!DOCTYPE html>
       <div class="row g-3 mb-4">
         {% for folder in folders %}
         <div class="col-12 col-md-6 col-lg-4">
-          <a href="{{ url_for('browse_folder', folder=(current_folder ~ '/' if current_folder else '') ~ folder) }}" class="text-reset text-decoration-none">
+          <a href="{{ url_for('browse_folder', folder=(current_folder ~ '/' if current_folder else '') ~ folder)|safe }}" class="text-reset text-decoration-none">
             <div class="p-3 bg-white border rounded-4 folder-card d-flex align-items-center gap-3">
               <i class="bi bi-folder-fill text-warning fs-2"></i>
               <div class="flex-grow-1">
@@ -139,19 +117,14 @@ HTML = """<!DOCTYPE html>
             <div class="d-flex align-items-center justify-content-between">
               <span class="badge badge-size">{{ file.size_h }}</span>
               <div class="btn-wrap">
-                <a class="btn btn-sm btn-outline-primary" href="{{ file.url }}" target="_blank" rel="noopener">
-                  Aç
-                </a>
+                <a class="btn btn-sm btn-outline-primary" href="{{ file.url }}" target="_blank" rel="noopener">Aç</a>
                 {% if file.is_image %}
-                  <button class="btn btn-sm btn-primary" onclick="openPreview('{{ loop.index0 }}')">
-                    Önizle
-                  </button>
+                  <button class="btn btn-sm btn-primary" onclick="openPreview('{{ loop.index0 }}')">Önizle</button>
                 {% endif %}
               </div>
             </div>
           </div>
         </div>
-
         {% endfor %}
       </div>
     {% else %}
@@ -175,9 +148,7 @@ HTML = """<!DOCTYPE html>
           </div>
         </div>
         <div class="modal-footer">
-          <a id="previewOpen" href="#" class="btn btn-outline-primary" target="_blank" rel="noopener">
-            Yeni Sekmede Aç
-          </a>
+          <a id="previewOpen" href="#" class="btn btn-outline-primary" target="_blank" rel="noopener">Yeni Sekmede Aç</a>
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Kapat</button>
         </div>
       </div>
@@ -207,7 +178,8 @@ HTML = """<!DOCTYPE html>
   </script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
-</html>"""  # Önceki Bootstrap + CSS + modal HTML kodunu buraya aynen koyabilirsin
+</html>
+"""
 
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.avif', '.heic', '.tiff'}
 
@@ -251,7 +223,7 @@ def home():
 
 @app.route('/folder/<path:folder>')
 def browse_folder(folder):
-    # Unicode klasör isimleri direkt kullanılıyor, unquote yok
+    folder = unquote(folder)  # <<== Unicode decode
     prefix = folder.rstrip('/') + '/'
     return list_objects(prefix=prefix, current_folder=folder)
 
@@ -274,10 +246,7 @@ def list_objects(prefix, current_folder=None):
             file_name = key[len(prefix):]
             if '/' in file_name: continue
 
-            url = s3.generate_presigned_url(
-                'get_object', Params={'Bucket': R2_BUCKET, 'Key': key}, ExpiresIn=3600
-            )
-
+            url = s3.generate_presigned_url('get_object', Params={'Bucket': R2_BUCKET, 'Key': key}, ExpiresIn=3600)
             ext = get_ext(file_name)
             is_image = ext in IMAGE_EXTS
             icon = DOC_ICON_MAP.get(ext, 'bi-file-earmark')
