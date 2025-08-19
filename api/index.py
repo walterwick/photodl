@@ -9,10 +9,8 @@ ACCOUNT_ID = '238a54d3f39bc03c25b5550bbd2683ed'
 
 # R2 endpoint URL'si (Cloudflare'dan al)
 R2_ENDPOINT = f'https://{ACCOUNT_ID}.r2.cloudflarestorage.com'
-
 app = Flask(__name__)
 
-# R2 istemcisi
 s3 = boto3.client(
     's3',
     endpoint_url=R2_ENDPOINT,
@@ -21,63 +19,98 @@ s3 = boto3.client(
     region_name='auto'
 )
 
-# HTML template
 HTML = """
 <!DOCTYPE html>
-<html>
+<html lang="tr">
 <head>
-  <title>R2 Dosya Yükleme ve Listeleme</title>
+  <meta charset="UTF-8" />
+  <title>R2 Dosya Yöneticisi</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 </head>
-<body>
-  <h2>Dosya Yükle (R2)</h2>
-  <form method="POST" enctype="multipart/form-data">
-    <input type="file" name="file">
-    <input type="submit" value="Yükle">
-  </form>
+<body class="bg-light">
+  <div class="container py-4">
+    <h1 class="mb-4">Cloudflare R2 Dosya Yöneticisi</h1>
 
-  {% if file_url %}
-    <h3>Yüklenen Dosya:</h3>
-    <a href="{{ file_url }}" target="_blank">{{ file_url }}</a><br><br>
-    <img src="{{ file_url }}" alt="Yüklenen Görsel" style="max-width: 400px;">
-  {% endif %}
+    {% if current_folder %}
+      <a href="{{ url_for('home') }}" class="btn btn-secondary mb-3">&larr; Ana Dizin</a>
+      <h3>Klasör: {{ current_folder }}</h3>
+    {% endif %}
 
-  <h2>Bucket İçeriği:</h2>
-  {% if contents %}
-    <ul>
-      {% for item in contents %}
-        <li>
-          <a href="{{ item.url }}" target="_blank">{{ item.key }}</a>
+    {% if folders %}
+      <h4>Klasörler</h4>
+      <div class="list-group mb-4">
+      {% for folder in folders %}
+        <a href="{{ url_for('browse_folder', folder=folder) }}" class="list-group-item list-group-item-action">
+          📁 {{ folder }}
+        </a>
+      {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if files %}
+      <h4>Dosyalar</h4>
+      <ul class="list-group">
+      {% for file in files %}
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+          <a href="{{ file.url }}" target="_blank">{{ file.name }}</a>
+          <span class="badge bg-primary rounded-pill">{{ file.size_kb }} KB</span>
         </li>
       {% endfor %}
-    </ul>
-  {% else %}
-    <p>Bucket boş.</p>
-  {% endif %}
+      </ul>
+    {% endif %}
+  </div>
 </body>
 </html>
 """
 
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    file_url = None
+def get_size_kb(size_bytes):
+    return f"{size_bytes // 1024}" if size_bytes > 1024 else f"{size_bytes} B"
 
-    # Yükleme
-    if request.method == 'POST':
-        file = request.files.get('file')
-        if file:
-            filename = file.filename
-            s3.upload_fileobj(file, R2_BUCKET, filename)
-            file_url = f"{R2_ENDPOINT}/{R2_BUCKET}/{filename}"
+@app.route('/')
+def home():
+    return list_objects(prefix='')
 
-    # Listeleme
-    response = s3.list_objects_v2(Bucket=R2_BUCKET)
-    contents = []
-    for obj in response.get('Contents', []):
-        key = obj['Key']
-        url = f"{R2_ENDPOINT}/{R2_BUCKET}/{key}"
-        contents.append({'key': key, 'url': url})
+@app.route('/folder/<path:folder>')
+def browse_folder(folder):
+    prefix = folder.rstrip('/') + '/'
+    return list_objects(prefix=prefix, current_folder=folder)
 
-    return render_template_string(HTML, file_url=file_url, contents=contents)
+def list_objects(prefix, current_folder=None):
+    paginator = s3.get_paginator('list_objects_v2')
+    page_iterator = paginator.paginate(Bucket=R2_BUCKET, Prefix=prefix, Delimiter='/')
+
+    folders = []
+    files = []
+
+    for page in page_iterator:
+        # Alt klasörler
+        for common_prefix in page.get('CommonPrefixes', []):
+            folder_name = common_prefix['Prefix'][len(prefix):].rstrip('/')
+            folders.append(folder_name)
+
+        # Dosyalar
+        for obj in page.get('Contents', []):
+            key = obj['Key']
+            if key == prefix:
+                continue  # klasör ismi dosya olarak gelmiş olabilir, atla
+            file_name = key[len(prefix):]
+            if '/' in file_name:
+                continue  # alt alt klasör dosyası, göz ardı et
+            url = s3.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': R2_BUCKET, 'Key': key},
+                ExpiresIn=3600
+            )
+            size_kb = get_size_kb(obj['Size'])
+            files.append({'name': file_name, 'url': url, 'size_kb': size_kb})
+
+    folders.sort()
+    files.sort(key=lambda x: x['name'].lower())
+
+    return render_template_string(HTML,
+                                  folders=folders,
+                                  files=files,
+                                  current_folder=current_folder)
 
 if __name__ == '__main__':
     app.run(debug=True)
