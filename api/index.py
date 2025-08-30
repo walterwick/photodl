@@ -3,6 +3,7 @@ import boto3
 import os
 from werkzeug.utils import secure_filename
 import uuid
+from urllib.parse import unquote # Türkçe karakter sorunu için eklendi
 
 # R2 access credentials
 AWS_ACCESS_KEY_ID = '112b183cdd116461df8ee2d8a647a58c'
@@ -22,7 +23,10 @@ s3 = boto3.client(
     region_name='auto'
 )
 
-# HTML template with dark mode, no image thumbnails, and responsive buttons
+# Resim dosyası uzantıları (Önizleme için)
+IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.avif', '.heic', '.tiff'}
+
+# HTML şablonu güncellendi: Yeni Klasör butonu, Resim Önizleme ve ilgili JS eklendi
 HTML = """<!DOCTYPE html>
 <html lang="tr" data-bs-theme="dark">
 <head>
@@ -36,15 +40,15 @@ HTML = """<!DOCTYPE html>
     .container-narrow { max-width: 1100px; }
     .folder-card { transition: transform .15s ease, box-shadow .15s ease; background: #2a2a2a; border: 1px solid rgba(255,255,255,.1); }
     .folder-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,.3); }
-    .file-grid { 
-      display: grid; 
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); 
-      gap: 16px; 
+    .file-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 16px;
     }
-    .file-card { 
-      border: 1px solid rgba(255,255,255,.1); 
-      border-radius: 16px; 
-      background: #2a2a2a; 
+    .file-card {
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 16px;
+      background: #2a2a2a;
       overflow: hidden;
       box-shadow: 0 2px 12px rgba(0,0,0,.2);
       transition: transform .15s ease, box-shadow .15s ease;
@@ -57,6 +61,8 @@ HTML = """<!DOCTYPE html>
       display: flex; align-items: center; justify-content: center;
       overflow: hidden;
     }
+    /* Resim önizlemeleri için stil */
+    .thumb-wrap img { width: 100%; height: 100%; object-fit: cover; }
     .file-meta { font-size: .9rem; color: #adb5bd; }
     .badge-size { background: #3b3b3b; color: #a5b4fc; }
     .file-title {
@@ -67,10 +73,10 @@ HTML = """<!DOCTYPE html>
     .thumb-icon { font-size: 2.25rem; color: #6c757d; }
     .crumb a { text-decoration: none; color: #a5b4fc; }
     .crumb a:hover { color: #fff; }
-    .btn-wrap { 
-      display: flex; 
-      gap: .5rem; 
-      flex-wrap: wrap; 
+    .btn-wrap {
+      display: flex;
+      gap: .5rem;
+      flex-wrap: wrap;
       justify-content: flex-end;
       flex-direction: row;
     }
@@ -135,6 +141,9 @@ HTML = """<!DOCTYPE html>
             <i class="bi bi-house"></i> Ana Dizin
           </a>
         {% endif %}
+        <button class="btn btn-outline-warning" onclick="createNewFolder()">
+            <i class="bi bi-folder-plus"></i> Yeni Klasör
+        </button>
         <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
           <i class="bi bi-upload"></i> Dosya Yükle
         </button>
@@ -142,20 +151,18 @@ HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Click-to-select zone -->
     <div class="click-zone" id="clickZone" onclick="document.getElementById('fileInput').click()">
       <p class="mb-1">Dosya seçmek için buraya tıklayın veya Ctrl+V ile yapıştırın</p>
       <p class="text-muted small">Birden fazla dosya seçebilirsiniz</p>
       <div class="upload-status" id="uploadStatus"></div>
     </div>
 
-    <!-- Upload Section -->
     <div class="upload-section" id="uploadSection">
       <h5>Dosya Yükleme</h5>
       <div id="fileList" class="mb-3"></div>
       <div class="mb-3">
-        <label for="destinationFolder" class="form-label">Hedef Klasör (örn: se veya klasor1/klasor2, boş bırakılırsa ana dizin)</label>
-        <input type="text" class="form-control" id="destinationFolder" placeholder="Klasör yolunu girin veya boş bırakın">
+        <label for="destinationFolder" class="form-label">Hedef Klasör (boş bırakılırsa mevcut dizin)</label>
+        <input type="text" class="form-control" id="destinationFolder" value="{{ current_folder or '' }}">
       </div>
       <button type="button" class="btn btn-primary" onclick="uploadFiles()" id="uploadButton" disabled>Yükle</button>
     </div>
@@ -201,9 +208,13 @@ HTML = """<!DOCTYPE html>
         {% for file in files %}
         <div class="file-card">
           <div class="thumb-wrap">
-            <div class="text-center">
-              <i class="bi {{ file.icon }} thumb-icon"></i>
-            </div>
+            {% if file.is_image %}
+                <img src="{{ file.url }}" alt="{{ file.name }}" loading="lazy">
+            {% else %}
+                <div class="text-center">
+                  <i class="bi {{ file.icon }} thumb-icon"></i>
+                </div>
+            {% endif %}
           </div>
           <div class="p-3">
             <div class="file-title mb-1" title="{{ file.name }}">{{ file.name }}</div>
@@ -225,14 +236,13 @@ HTML = """<!DOCTYPE html>
         </div>
         {% endfor %}
       </div>
-    {% else %}
+    {% elif not folders %}
       <div class="alert alert-info mt-4">
-        Bu dizinde gösterilecek dosya yok.
+        Bu dizinde gösterilecek dosya veya klasör yok.
       </div>
     {% endif %}
   </div>
 
-  <!-- Rename/Move Modal -->
   <div class="modal fade" id="renameModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
       <div class="modal-content">
@@ -246,8 +256,8 @@ HTML = """<!DOCTYPE html>
             <input type="text" class="form-control" id="renameFileName">
           </div>
           <div class="mb-3">
-            <label for="renameDestination" class="form-label">Hedef Klasör (örn: se veya klasor1/klasor2, boş bırakılırsa ana dizin)</label>
-            <input type="text" class="form-control" id="renameDestination" placeholder="Klasör yolunu girin veya boş bırakın">
+            <label for="renameDestination" class="form-label">Hedef Klasör (boş bırakılırsa ana dizin)</label>
+            <input type="text" class="form-control" id="renameDestination" placeholder="örn: se veya klasor1/klasor2">
           </div>
         </div>
         <div class="modal-footer">
@@ -258,7 +268,6 @@ HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Delete Confirmation Modal -->
   <div class="modal fade" id="deleteModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
       <div class="modal-content">
@@ -279,6 +288,7 @@ HTML = """<!DOCTYPE html>
 
   <script>
     const files = {{ files|tojson }};
+    const currentFolder = '{{ current_folder or '' }}';
     const renameModalEl = document.getElementById('renameModal');
     const deleteModalEl = document.getElementById('deleteModal');
     const fileListEl = document.getElementById('fileList');
@@ -301,6 +311,37 @@ HTML = """<!DOCTYPE html>
         }
       });
     });
+    
+    // YENİ KLASÖR OLUŞTURMA FONKSİYONU
+    async function createNewFolder() {
+        const folderName = prompt("Oluşturulacak klasörün adını girin:", "Yeni Klasör");
+        if (!folderName || folderName.trim() === "") {
+            return; // Kullanıcı iptal etti veya boş isim girdi
+        }
+        
+        const path = currentFolder ? `${currentFolder}/${folderName}` : folderName;
+
+        const statusEl = document.getElementById('uploadStatus');
+        statusEl.className = 'upload-status show';
+        statusEl.innerHTML = `<div class="text-info">'${folderName}' klasörü oluşturuluyor...</div>`;
+        
+        try {
+            const response = await fetch('/create_new_folder', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path })
+            });
+            const result = await response.json();
+            if (result.success) {
+                statusEl.innerHTML = `<div class="text-success">'${folderName}' başarıyla oluşturuldu. Sayfa yenileniyor...</div>`;
+                setTimeout(() => window.location.reload(), 1500);
+            } else {
+                statusEl.innerHTML = `<div class="text-danger">Klasör oluşturulamadı: ${result.error}</div>`;
+            }
+        } catch (error) {
+            statusEl.innerHTML = `<div class="text-danger">Klasör oluşturulamadı: ${error.message}</div>`;
+        }
+    }
 
     function handleFiles(files) {
       selectedFiles = Array.from(files);
@@ -334,7 +375,7 @@ HTML = """<!DOCTYPE html>
     }
 
     async function uploadFiles() {
-      let destination = document.getElementById('destinationFolder').value.trim().replace(/^\/+|\/+$/g, '');
+      let destination = document.getElementById('destinationFolder').value.trim().replace(/^\\/+|\/+$/g, '');
       if (destination === '') destination = '';
       const statusEl = document.getElementById('uploadStatus');
       statusEl.className = 'upload-status show';
@@ -350,29 +391,6 @@ HTML = """<!DOCTYPE html>
         progressDiv.style.display = 'block';
 
         try {
-          // Check if file exists
-          const response = await fetch('/check_file', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key })
-          });
-          const result = await response.json();
-          if (result.exists) {
-            statusEl.innerHTML += `<div class="text-warning">${newName} zaten var, atlanıyor.</div>`;
-            progressDiv.style.display = 'none';
-            continue;
-          }
-
-          // Ensure folder exists
-          if (destination) {
-            await fetch('/create_folder', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ folder: destination })
-            });
-          }
-
-          // Upload file with progress
           const formData = new FormData();
           formData.append('file', file, newName);
           formData.append('destination', destination);
@@ -383,21 +401,18 @@ HTML = """<!DOCTYPE html>
             if (event.lengthComputable) {
               const percent = (event.loaded / event.total) * 100;
               progressBar.style.width = `${percent}%`;
-              progressBar.setAttribute('aria-valuenow', percent);
             }
           };
           xhr.onload = () => {
-            const uploadResult = JSON.parse(xhr.responseText);
-            progressDiv.style.display = 'none';
-            if (xhr.status === 200 && uploadResult.success) {
+            if (xhr.status === 200) {
               statusEl.innerHTML += `<div class="text-success">${newName} başarıyla yüklendi.</div>`;
             } else {
-              statusEl.innerHTML += `<div class="text-danger">${newName} yüklenemedi: ${uploadResult.error || 'Hata'}</div>`;
+              const errorResult = JSON.parse(xhr.responseText);
+              statusEl.innerHTML += `<div class="text-danger">${newName} yüklenemedi: ${errorResult.error || 'Bilinmeyen Hata'}</div>`;
             }
-          };
-          xhr.onerror = () => {
-            progressDiv.style.display = 'none';
-            statusEl.innerHTML += `<div class="text-danger">${newName} yüklenemedi: Bağlantı hatası</div>`;
+            if (i === selectedFiles.length - 1) { // Son dosya ise
+                 setTimeout(() => window.location.reload(), 2000);
+            }
           };
           xhr.send(formData);
         } catch (error) {
@@ -405,16 +420,6 @@ HTML = """<!DOCTYPE html>
           statusEl.innerHTML += `<div class="text-danger">${newName} yüklenemedi: ${error.message}</div>`;
         }
       }
-
-      setTimeout(() => {
-        statusEl.className = 'upload-status';
-        statusEl.innerHTML = '';
-        fileListEl.innerHTML = '';
-        selectedFiles = [];
-        uploadSection.classList.remove('show');
-        uploadButton.disabled = true;
-        window.location.reload();
-      }, 2000);
     }
 
     function openRenameModal(key, name) {
@@ -427,52 +432,16 @@ HTML = """<!DOCTYPE html>
 
     async function renameFile() {
       const newName = document.getElementById('renameFileName').value;
-      let newDestination = document.getElementById('renameDestination').value.trim().replace(/^\/+|\/+$/g, '');
-      if (newDestination === '') newDestination = '';
+      let newDestination = document.getElementById('renameDestination').value.trim().replace(/^\\/+|\/+$/g, '');
       const newKey = newDestination ? `${newDestination}/${newName}` : newName;
-      const statusEl = document.getElementById('uploadStatus');
-      statusEl.className = 'upload-status show';
-
-      try {
-        // Check if new path exists
-        const response = await fetch('/check_file', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: newKey })
-        });
-        const result = await response.json();
-        if (result.exists) {
-          statusEl.innerHTML = `<div class="text-warning">${newName} zaten var, işlem atlandı.</div>`;
-          bsRenameModal.hide();
-          return;
-        }
-
-        // Ensure new folder exists
-        if (newDestination) {
-          await fetch('/create_folder', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ folder: newDestination })
-          });
-        }
-
-        // Copy to new key and delete old key
-        await fetch('/rename_file', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ old_key: renameKey, new_key: newKey })
-        });
-
-        statusEl.innerHTML = `<div class="text-success">${newName} başarıyla yeniden adlandırıldı/taşındı.</div>`;
-        setTimeout(() => {
-          statusEl.className = 'upload-status';
-          statusEl.innerHTML = '';
-          window.location.reload();
-        }, 1500);
-      } catch (error) {
-        statusEl.innerHTML = `<div class="text-danger">İşlem başarısız: ${error.message}</div>`;
-      }
+      
+      const response = await fetch('/rename_file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ old_key: renameKey, new_key: newKey })
+      });
       bsRenameModal.hide();
+      window.location.reload();
     }
 
     function confirmDelete(key, name) {
@@ -483,43 +452,26 @@ HTML = """<!DOCTYPE html>
     }
 
     async function deleteFile() {
-      const statusEl = document.getElementById('uploadStatus');
-      statusEl.className = 'upload-status show';
-      try {
-        const response = await fetch('/delete_file', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key: deleteKey })
-        });
-        const result = await response.json();
-        if (result.success) {
-          statusEl.innerHTML = `<div class="text-success">Dosya başarıyla silindi.</div>`;
-          setTimeout(() => {
-            statusEl.className = 'upload-status';
-            statusEl.innerHTML = '';
-            window.location.reload();
-          }, 1500);
-        } else {
-          statusEl.innerHTML = `<div class="text-danger">Dosya silinemedi: ${result.error}</div>`;
-        }
-      } catch (error) {
-        statusEl.innerHTML = `<div class="text-danger">Dosya silinemedi: ${error.message}</div>`;
-      }
+      const response = await fetch('/delete_file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: deleteKey })
+      });
       bsDeleteModal.hide();
+      window.location.reload();
     }
   </script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>"""
 
-IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.avif', '.heic', '.tiff'}
-
 DOC_ICON_MAP = {
     '.pdf': 'bi-filetype-pdf', '.txt': 'bi-filetype-txt', '.md': 'bi-markdown', '.csv': 'bi-filetype-csv',
     '.xls': 'bi-filetype-xls', '.xlsx': 'bi-filetype-xlsx', '.doc': 'bi-filetype-doc', '.docx': 'bi-filetype-docx',
     '.ppt': 'bi-filetype-ppt', '.pptx': 'bi-filetype-pptx', '.zip': 'bi-file-zip', '.rar': 'bi-file-zip',
     '.7z':  'bi-file-zip', '.json': 'bi-filetype-json', '.js': 'bi-filetype-js', '.html': 'bi-filetype-html',
-    '.css': 'bi-filetype-css',
+    '.css': 'bi-filetype-css', '.mp3': 'bi-filetype-mp3', '.wav': 'bi-file-music', '.mp4': 'bi-filetype-mp4',
+    '.mov': 'bi-film', '.avi': 'bi-film',
 }
 
 def human_size(n):
@@ -554,8 +506,11 @@ def home():
 
 @app.route('/folder/<path:folder>')
 def browse_folder(folder):
-    prefix = folder.rstrip('/') + '/'
-    return list_objects(prefix=prefix, current_folder=folder)
+    # TÜRKÇE KARAKTER SORUNU ÇÖZÜMÜ
+    # Gelen 'folder' yolunu URL kodlamasından tamamen arındır
+    decoded_folder = unquote(folder)
+    prefix = decoded_folder.rstrip('/') + '/'
+    return list_objects(prefix=prefix, current_folder=decoded_folder)
 
 def list_objects(prefix, current_folder=None):
     paginator = s3.get_paginator('list_objects_v2')
@@ -572,7 +527,9 @@ def list_objects(prefix, current_folder=None):
 
         for obj in page.get('Contents', []):
             key = obj['Key']
-            if key == prefix or key.endswith('/'): continue
+            # .placeholder dosyalarını ve mevcut klasörün kendisini gösterme
+            if key == prefix or key.endswith('/.placeholder') or key.endswith('/'): continue
+            
             file_name = key[len(prefix):]
             if '/' in file_name: continue
 
@@ -582,13 +539,15 @@ def list_objects(prefix, current_folder=None):
 
             ext = get_ext(file_name)
             icon = DOC_ICON_MAP.get(ext, 'bi-file-earmark')
+            is_image = ext in IMAGE_EXTS # RESİM ÖNİZLEME İÇİN KONTROL
 
             files.append({
                 'name': file_name,
                 'key': key,
                 'url': url,
                 'size_h': human_size(obj['Size']),
-                'icon': icon
+                'icon': icon,
+                'is_image': is_image # Şablona gönderilecek veri
             })
 
     folders.sort(key=lambda x: x.lower())
@@ -602,44 +561,33 @@ def list_objects(prefix, current_folder=None):
         breadcrumb=build_breadcrumb(current_folder)
     )
 
-@app.route('/check_file', methods=['POST'])
-def check_file():
-    data = request.get_json()
-    key = data.get('key')
-    try:
-        s3.head_object(Bucket=R2_BUCKET, Key=key)
-        return jsonify({'exists': True})
-    except s3.exceptions.ClientError:
-        return jsonify({'exists': False})
-
-@app.route('/create_folder', methods=['POST'])
-def create_folder():
-    data = request.get_json()
-    folder = data.get('folder')
-    if not folder:
-        return jsonify({'success': True})
-    try:
-        placeholder_key = f"{folder}/.placeholder"
-        s3.put_object(Bucket=R2_BUCKET, Key=placeholder_key, Body=b'')
-        s3.delete_object(Bucket=R2_BUCKET, Key=placeholder_key)
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
-
 @app.route('/upload', methods=['POST'])
 def upload_file():
     file = request.files.get('file')
     destination = request.form.get('destination', '')
     if not file:
-        return jsonify({'success': False, 'error': 'Dosya bulunamadı'})
+        return jsonify({'success': False, 'error': 'Dosya bulunamadı'}), 400
 
     filename = secure_filename(file.filename)
     key = f"{destination}/{filename}" if destination else filename
+    
+    # Dosyanın zaten var olup olmadığını kontrol et
+    try:
+        s3.head_object(Bucket=R2_BUCKET, Key=key)
+        return jsonify({'success': False, 'error': f"'{filename}' adında bir dosya zaten var."}), 409 # 409 Conflict
+    except s3.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == '404':
+             # Dosya yok, yüklemeye devam et
+            pass
+        else:
+            # Başka bir client hatası
+            return jsonify({'success': False, 'error': str(e)}), 500
+            
     try:
         s3.upload_fileobj(file, R2_BUCKET, key)
         return jsonify({'success': True})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/rename_file', methods=['POST'])
 def rename_file():
@@ -649,17 +597,9 @@ def rename_file():
     try:
         s3.copy_object(Bucket=R2_BUCKET, CopySource={'Bucket': R2_BUCKET, 'Key': old_key}, Key=new_key)
         s3.delete_object(Bucket=R2_BUCKET, Key=old_key)
-        old_folder = '/'.join(old_key.split('/')[:-1])
-        if old_folder:
-            response = s3.list_objects_v2(Bucket=R2_BUCKET, Prefix=f"{old_folder}/")
-            if 'Contents' not in response or not response['Contents']:
-                try:
-                    s3.delete_object(Bucket=R2_BUCKET, Key=f"{old_folder}/.placeholder")
-                except:
-                    pass
         return jsonify({'success': True})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/delete_file', methods=['POST'])
 def delete_file():
@@ -667,17 +607,29 @@ def delete_file():
     key = data.get('key')
     try:
         s3.delete_object(Bucket=R2_BUCKET, Key=key)
-        folder = '/'.join(key.split('/')[:-1])
-        if folder:
-            response = s3.list_objects_v2(Bucket=R2_BUCKET, Prefix=f"{folder}/")
-            if 'Contents' not in response or not response['Contents']:
-                try:
-                    s3.delete_object(Bucket=R2_BUCKET, Key=f"{folder}/.placeholder")
-                except:
-                    pass
         return jsonify({'success': True})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# YENİ KLASÖR OLUŞTURMA ENDPOINT'İ
+@app.route('/create_new_folder', methods=['POST'])
+def create_new_folder():
+    data = request.get_json()
+    path = data.get('path', '').strip()
+    if not path:
+        return jsonify({'success': False, 'error': 'Klasör adı geçersiz.'}), 400
+
+    # S3/R2'de klasörler, içinde nesne olunca var olur.
+    # Boş bir klasör oluşturmak için sonuna .placeholder gibi bir nesne ekleriz.
+    placeholder_key = f"{path.rstrip('/')}/.placeholder"
+    
+    try:
+        # Önce bu placeholder'ın var olup olmadığını kontrol etmeye gerek yok,
+        # üzerine yazmak bir sorun teşkil etmez.
+        s3.put_object(Bucket=R2_BUCKET, Key=placeholder_key, Body=b'')
+        return jsonify({'success': True})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(debug=True)
