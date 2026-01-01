@@ -1,635 +1,1277 @@
-from flask import Flask, request, render_template_string, jsonify
-import boto3
 import os
-from werkzeug.utils import secure_filename
-import uuid
-from urllib.parse import unquote # Türkçe karakter sorunu için eklendi
+import boto3
+from flask import Flask, render_template_string, request, redirect, url_for, flash, send_file, Response
+from botocore.exceptions import ClientError
+import mimetypes
 
-# R2 access credentials
-AWS_ACCESS_KEY_ID = '112b183cdd116461df8ee2d8a647a58c'
-AWS_SECRET_ACCESS_KEY = 'dd104010783bf0278926182bb9a1d0496c6f62907241d5f196918d7089fe005d'
-R2_BUCKET = 'walter'
-ACCOUNT_ID = '238a54d3f39bc03c25b5550bbd2683ed'
+# --- CONFIGURATION ---
+# SECURITY WARNING: NEVER COMMIT ACTUAL CREDENTIALS TO VERSION CONTROL
+# REPLACE THESE VALUES WITH YOUR ACTUAL AWS CREDENTIALS
+# --- CONFIGURATION ---
+# SECURITY WARNING: NEVER COMMIT ACTUAL CREDENTIALS TO VERSION CONTROL
+# REPLACE THESE VALUES WITH YOUR ACTUAL AWS CREDENTIALS
+AWS_ACCESS_KEY_ID = '0a7f0017d897d5b8b982ad26e5711a21'
+AWS_SECRET_ACCESS_KEY = '9125af83e42fbf5237304c13ea46df52bb1aa5557227fa5f15e8df2fe45f9f31'
+AWS_BUCKET_NAME = 'walter'
+AWS_ENDPOINT_URL = 'https://a3855f747521f7ef4cea32514f2279e2.r2.cloudflarestorage.com'
+AWS_REGION = 'auto' # R2 requires a region, 'auto' is usually fine or 'us-east-1'
 
-# R2 endpoint URL
-R2_ENDPOINT = f'https://{ACCOUNT_ID}.r2.cloudflarestorage.com'
 app = Flask(__name__)
+# Increase max upload size to 16GB (default is usually unlimited but good to be explicit or avoid proxy issues)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024 
+app.secret_key = 'super-secret-key-for-flash-messages'
 
-s3 = boto3.client(
-    's3',
-    endpoint_url=R2_ENDPOINT,
-    aws_access_key_id=AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-    region_name='auto'
-)
-
-# Resim dosyası uzantıları (Önizleme için)
-IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.svg', '.avif', '.heic', '.tiff'}
-
-# HTML şablonu güncellendi: Yeni Klasör butonu, Resim Önizleme ve ilgili JS eklendi
-HTML = """<!DOCTYPE html>
-<html lang="tr" data-bs-theme="dark">
-<head>
-  <meta charset="UTF-8" />
-  <title>R2 Dosya Yöneticisi</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
-  <style>
-    body { background: #1a1a1a; }
-    .container-narrow { max-width: 1100px; }
-    .folder-card { transition: transform .15s ease, box-shadow .15s ease; background: #2a2a2a; border: 1px solid rgba(255,255,255,.1); }
-    .folder-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,.3); }
-    .file-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-      gap: 16px;
-    }
-    .file-card {
-      border: 1px solid rgba(255,255,255,.1);
-      border-radius: 16px;
-      background: #2a2a2a;
-      overflow: hidden;
-      box-shadow: 0 2px 12px rgba(0,0,0,.2);
-      transition: transform .15s ease, box-shadow .15s ease;
-    }
-    .file-card:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(0,0,0,.3); }
-    .thumb-wrap {
-      width: 100%;
-      aspect-ratio: 16/10;
-      background: #333;
-      display: flex; align-items: center; justify-content: center;
-      overflow: hidden;
-    }
-    /* Resim önizlemeleri için stil */
-    .thumb-wrap img { width: 100%; height: 100%; object-fit: cover; }
-    .file-meta { font-size: .9rem; color: #adb5bd; }
-    .badge-size { background: #3b3b3b; color: #a5b4fc; }
-    .file-title {
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-      font-weight: 600;
-      color: #e9ecef;
-    }
-    .thumb-icon { font-size: 2.25rem; color: #6c757d; }
-    .crumb a { text-decoration: none; color: #a5b4fc; }
-    .crumb a:hover { color: #fff; }
-    .btn-wrap {
-      display: flex;
-      gap: .5rem;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-      flex-direction: row;
-    }
-    @media (max-width: 576px) {
-      .btn-wrap {
-        flex-direction: column;
-        align-items: stretch;
-      }
-      .btn-wrap .btn {
-        width: 100%;
-        text-align: center;
-      }
-    }
-    .click-zone {
-      border: 2px dashed #444;
-      border-radius: 12px;
-      padding: 2rem;
-      text-align: center;
-      background: #2a2a2a;
-      margin-bottom: 1.5rem;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      color: #adb5bd;
-    }
-    .click-zone:hover {
-      border-color: #0d6efd;
-      background: #3a3a3a;
-    }
-    .upload-status { display: none; margin-top: 1rem; }
-    .upload-status.show { display: block; }
-    .upload-section {
-      display: none;
-      background: #2a2a2a;
-      border: 1px solid rgba(255,255,255,.1);
-      border-radius: 12px;
-      padding: 1.5rem;
-      margin-bottom: 1.5rem;
-    }
-    .upload-section.show { display: block; }
-    .progress {
-      height: 8px;
-      margin-top: 0.5rem;
-      background: #333;
-    }
-    .form-control { background: #333; color: #e9ecef; border-color: #444; }
-    .form-control:focus { background: #333; color: #e9ecef; border-color: #0d6efd; }
-    .input-group-text { background: #3b3b3b; color: #adb5bd; border-color: #444; }
-    .modal-content { background: #2a2a2a; border: 1px solid rgba(255,255,255,.1); }
-    .modal-header, .modal-footer { border-color: rgba(255,255,255,.1); }
-  </style>
-</head>
-<body>
-  <div class="container container-narrow py-4">
-    <div class="d-flex align-items-center justify-content-between mb-3">
-      <div class="d-flex align-items-center gap-2">
-        <i class="bi bi-cloud-fill fs-3 text-primary"></i>
-        <h1 class="h3 mb-0">Cloudflare R2 Dosya Yöneticisi</h1>
-      </div>
-      <div class="d-flex gap-2">
-        {% if current_folder %}
-          <a href="{{ url_for('home') }}" class="btn btn-outline-secondary">
-            <i class="bi bi-house"></i> Ana Dizin
-          </a>
-        {% endif %}
-        <button class="btn btn-outline-warning" onclick="createNewFolder()">
-            <i class="bi bi-folder-plus"></i> Yeni Klasör
-        </button>
-        <button class="btn btn-primary" onclick="document.getElementById('fileInput').click()">
-          <i class="bi bi-upload"></i> Dosya Yükle
-        </button>
-        <input type="file" id="fileInput" multiple style="display:none;" onchange="handleFiles(this.files)">
-      </div>
-    </div>
-
-    <div class="click-zone" id="clickZone" onclick="document.getElementById('fileInput').click()">
-      <p class="mb-1">Dosya seçmek için buraya tıklayın veya Ctrl+V ile yapıştırın</p>
-      <p class="text-muted small">Birden fazla dosya seçebilirsiniz</p>
-      <div class="upload-status" id="uploadStatus"></div>
-    </div>
-
-    <div class="upload-section" id="uploadSection">
-      <h5>Dosya Yükleme</h5>
-      <div id="fileList" class="mb-3"></div>
-      <div class="mb-3">
-        <label for="destinationFolder" class="form-label">Hedef Klasör (boş bırakılırsa mevcut dizin)</label>
-        <input type="text" class="form-control" id="destinationFolder" value="{{ current_folder or '' }}">
-      </div>
-      <button type="button" class="btn btn-primary" onclick="uploadFiles()" id="uploadButton" disabled>Yükle</button>
-    </div>
-
-    {% if breadcrumb and breadcrumb|length %}
-      <nav aria-label="breadcrumb">
-        <ol class="breadcrumb">
-          <li class="breadcrumb-item"><a href="{{ url_for('home') }}">Ana Dizin</a></li>
-          {% for name, path in breadcrumb %}
-            {% if loop.last %}
-              <li class="breadcrumb-item active" aria-current="page">{{ name }}</li>
-            {% else %}
-              <li class="breadcrumb-item"><a href="{{ url_for('browse_folder', folder=path) }}">{{ name }}</a></li>
-            {% endif %}
-          {% endfor %}
-        </ol>
-      </nav>
-    {% endif %}
-
-    {% if folders %}
-      <h4 class="mt-2 mb-2">Klasörler</h4>
-      <div class="row g-3 mb-4">
-        {% for folder in folders %}
-        <div class="col-12 col-md-6 col-lg-4">
-          <a href="{{ url_for('browse_folder', folder=(current_folder ~ '/' if current_folder else '') ~ folder) }}" class="text-reset text-decoration-none">
-            <div class="p-3 border rounded-4 folder-card d-flex align-items-center gap-3">
-              <i class="bi bi-folder-fill text-warning fs-2"></i>
-              <div class="flex-grow-1">
-                <div class="fw-semibold">{{ folder }}</div>
-                <div class="text-muted small">Klasöre git</div>
-              </div>
-              <i class="bi bi-chevron-right text-muted"></i>
-            </div>
-          </a>
-        </div>
-        {% endfor %}
-      </div>
-    {% endif %}
-
-    {% if files %}
-      <h4 class="mt-2 mb-3">Dosyalar</h4>
-      <div class="file-grid">
-        {% for file in files %}
-        <div class="file-card">
-          <div class="thumb-wrap">
-            {% if file.is_image %}
-                <img src="{{ file.url }}" alt="{{ file.name }}" loading="lazy">
-            {% else %}
-                <div class="text-center">
-                  <i class="bi {{ file.icon }} thumb-icon"></i>
-                </div>
-            {% endif %}
-          </div>
-          <div class="p-3">
-            <div class="file-title mb-1" title="{{ file.name }}">{{ file.name }}</div>
-            <div class="d-flex align-items-center justify-content-between">
-              <span class="badge badge-size">{{ file.size_h }}</span>
-              <div class="btn-wrap">
-                <a class="btn btn-sm btn-outline-primary" href="{{ file.url }}" target="_blank" rel="noopener">
-                  Aç
-                </a>
-                <button class="btn btn-sm btn-warning" onclick="openRenameModal('{{ file.key }}', '{{ file.name }}')">
-                  Yeniden Adlandır/Taşı
-                </button>
-                <button class="btn btn-sm btn-danger" onclick="confirmDelete('{{ file.key }}', '{{ file.name }}')">
-                  Sil
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-        {% endfor %}
-      </div>
-    {% elif not folders %}
-      <div class="alert alert-info mt-4">
-        Bu dizinde gösterilecek dosya veya klasör yok.
-      </div>
-    {% endif %}
-  </div>
-
-  <div class="modal fade" id="renameModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title">Dosya Yeniden Adlandır/Taşı</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Kapat"></button>
-        </div>
-        <div class="modal-body">
-          <div class="mb-3">
-            <label for="renameFileName" class="form-label">Yeni Dosya Adı</label>
-            <input type="text" class="form-control" id="renameFileName">
-          </div>
-          <div class="mb-3">
-            <label for="renameDestination" class="form-label">Hedef Klasör (boş bırakılırsa ana dizin)</label>
-            <input type="text" class="form-control" id="renameDestination" placeholder="örn: se veya klasor1/klasor2">
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">İptal</button>
-          <button type="button" class="btn btn-primary" id="confirmRenameBtn">Kaydet</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="modal fade" id="deleteModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title">Dosya Silme Onayı</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Kapat"></button>
-        </div>
-        <div class="modal-body">
-          <p><strong id="deleteFileName"></strong> dosyasını silmek istediğinizden emin misiniz?</p>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">İptal</button>
-          <button type="button" class="btn btn-danger" id="confirmDeleteBtn">Sil</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    const files = {{ files|tojson }};
-    const currentFolder = '{{ current_folder or '' }}';
-    const renameModalEl = document.getElementById('renameModal');
-    const deleteModalEl = document.getElementById('deleteModal');
-    const fileListEl = document.getElementById('fileList');
-    const uploadSection = document.getElementById('uploadSection');
-    const uploadButton = document.getElementById('uploadButton');
-    let bsRenameModal, bsDeleteModal;
-    let selectedFiles = [];
-    let deleteKey = '';
-    let renameKey = '';
-
-    document.addEventListener('DOMContentLoaded', function() {
-      bsRenameModal = new bootstrap.Modal(renameModalEl);
-      bsDeleteModal = new bootstrap.Modal(deleteModalEl);
-
-      // Paste handler
-      document.addEventListener('paste', (e) => {
-        const files = e.clipboardData.files;
-        if (files.length) {
-          handleFiles(files);
-        }
-      });
-    });
-    
-    // YENİ KLASÖR OLUŞTURMA FONKSİYONU
-    async function createNewFolder() {
-        const folderName = prompt("Oluşturulacak klasörün adını girin:", "Yeni Klasör");
-        if (!folderName || folderName.trim() === "") {
-            return; // Kullanıcı iptal etti veya boş isim girdi
-        }
-        
-        const path = currentFolder ? `${currentFolder}/${folderName}` : folderName;
-
-        const statusEl = document.getElementById('uploadStatus');
-        statusEl.className = 'upload-status show';
-        statusEl.innerHTML = `<div class="text-info">'${folderName}' klasörü oluşturuluyor...</div>`;
-        
-        try {
-            const response = await fetch('/create_new_folder', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path: path })
-            });
-            const result = await response.json();
-            if (result.success) {
-                statusEl.innerHTML = `<div class="text-success">'${folderName}' başarıyla oluşturuldu. Sayfa yenileniyor...</div>`;
-                setTimeout(() => window.location.reload(), 1500);
-            } else {
-                statusEl.innerHTML = `<div class="text-danger">Klasör oluşturulamadı: ${result.error}</div>`;
-            }
-        } catch (error) {
-            statusEl.innerHTML = `<div class="text-danger">Klasör oluşturulamadı: ${error.message}</div>`;
-        }
-    }
-
-    function handleFiles(files) {
-      selectedFiles = Array.from(files);
-      fileListEl.innerHTML = '';
-      selectedFiles.forEach((file, idx) => {
-        const div = document.createElement('div');
-        div.className = 'mb-2';
-        div.innerHTML = `
-          <div class="input-group">
-            <input type="text" class="form-control" value="${file.name}" id="fileName${idx}">
-            <button class="btn btn-outline-secondary" onclick="randomizeName(${idx})">
-              <i class="bi bi-shuffle"></i>
-            </button>
-            <span class="input-group-text">${(file.size / 1024 / 1024).toFixed(2)} MB</span>
-          </div>
-          <div class="progress" id="progress${idx}" style="display: none;">
-            <div class="progress-bar" role="progressbar" style="width: 0%;" id="progressBar${idx}"></div>
-          </div>
-        `;
-        fileListEl.appendChild(div);
-      });
-      uploadSection.classList.add('show');
-      uploadButton.disabled = selectedFiles.length === 0;
-    }
-
-    function randomizeName(idx) {
-      const input = document.getElementById(`fileName${idx}`);
-      const ext = input.value.split('.').pop();
-      const randomName = `${crypto.randomUUID()}.${ext}`;
-      input.value = randomName;
-    }
-
-    async function uploadFiles() {
-      let destination = document.getElementById('destinationFolder').value.trim().replace(/^\\/+|\/+$/g, '');
-      if (destination === '') destination = '';
-      const statusEl = document.getElementById('uploadStatus');
-      statusEl.className = 'upload-status show';
-      statusEl.innerHTML = 'Yükleniyor...';
-      uploadButton.disabled = true;
-
-      for (let i = 0; i < selectedFiles.length; i++) {
-        const file = selectedFiles[i];
-        const newName = document.getElementById(`fileName${i}`).value;
-        const key = destination ? `${destination}/${newName}` : newName;
-        const progressBar = document.getElementById(`progressBar${i}`);
-        const progressDiv = document.getElementById(`progress${i}`);
-        progressDiv.style.display = 'block';
-
-        try {
-          const formData = new FormData();
-          formData.append('file', file, newName);
-          formData.append('destination', destination);
-
-          const xhr = new XMLHttpRequest();
-          xhr.open('POST', '/upload', true);
-          xhr.upload.onprogress = (event) => {
-            if (event.lengthComputable) {
-              const percent = (event.loaded / event.total) * 100;
-              progressBar.style.width = `${percent}%`;
-            }
-          };
-          xhr.onload = () => {
-            if (xhr.status === 200) {
-              statusEl.innerHTML += `<div class="text-success">${newName} başarıyla yüklendi.</div>`;
-            } else {
-              const errorResult = JSON.parse(xhr.responseText);
-              statusEl.innerHTML += `<div class="text-danger">${newName} yüklenemedi: ${errorResult.error || 'Bilinmeyen Hata'}</div>`;
-            }
-            if (i === selectedFiles.length - 1) { // Son dosya ise
-                 setTimeout(() => window.location.reload(), 2000);
-            }
-          };
-          xhr.send(formData);
-        } catch (error) {
-          progressDiv.style.display = 'none';
-          statusEl.innerHTML += `<div class="text-danger">${newName} yüklenemedi: ${error.message}</div>`;
-        }
-      }
-    }
-
-    function openRenameModal(key, name) {
-      renameKey = key;
-      document.getElementById('renameFileName').value = name;
-      document.getElementById('renameDestination').value = key.split('/').slice(0, -1).join('/');
-      document.getElementById('confirmRenameBtn').onclick = () => renameFile();
-      bsRenameModal.show();
-    }
-
-    async function renameFile() {
-      const newName = document.getElementById('renameFileName').value;
-      let newDestination = document.getElementById('renameDestination').value.trim().replace(/^\\/+|\/+$/g, '');
-      const newKey = newDestination ? `${newDestination}/${newName}` : newName;
-      
-      const response = await fetch('/rename_file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ old_key: renameKey, new_key: newKey })
-      });
-      bsRenameModal.hide();
-      window.location.reload();
-    }
-
-    function confirmDelete(key, name) {
-      deleteKey = key;
-      document.getElementById('deleteFileName').textContent = name;
-      document.getElementById('confirmDeleteBtn').onclick = () => deleteFile();
-      bsDeleteModal.show();
-    }
-
-    async function deleteFile() {
-      const response = await fetch('/delete_file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: deleteKey })
-      });
-      bsDeleteModal.hide();
-      window.location.reload();
-    }
-  </script>
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>"""
-
-DOC_ICON_MAP = {
-    '.pdf': 'bi-filetype-pdf', '.txt': 'bi-filetype-txt', '.md': 'bi-markdown', '.csv': 'bi-filetype-csv',
-    '.xls': 'bi-filetype-xls', '.xlsx': 'bi-filetype-xlsx', '.doc': 'bi-filetype-doc', '.docx': 'bi-filetype-docx',
-    '.ppt': 'bi-filetype-ppt', '.pptx': 'bi-filetype-pptx', '.zip': 'bi-file-zip', '.rar': 'bi-file-zip',
-    '.7z':  'bi-file-zip', '.json': 'bi-filetype-json', '.js': 'bi-filetype-js', '.html': 'bi-filetype-html',
-    '.css': 'bi-filetype-css', '.mp3': 'bi-filetype-mp3', '.wav': 'bi-file-music', '.mp4': 'bi-filetype-mp4',
-    '.mov': 'bi-film', '.avi': 'bi-film',
-}
-
-def human_size(n):
-    step = 1024.0
-    if n < step: return f"{n} B"
-    n /= step
-    if n < step: return f"{n:.1f} KB"
-    n /= step
-    if n < step: return f"{n:.1f} MB"
-    n /= step
-    return f"{n:.1f} GB"
-
-def get_ext(name):
-    name_low = name.lower()
-    dot = name_low.rfind('.')
-    return name_low[dot:] if dot != -1 else ''
-
-def build_breadcrumb(current_folder):
-    if not current_folder:
-        return []
-    parts = [p for p in current_folder.strip('/').split('/') if p]
-    crumb = []
-    accum = []
-    for p in parts:
-        accum.append(p)
-        crumb.append((p, '/'.join(accum)))
-    return crumb
-
-@app.route('/')
-def home():
-    return list_objects(prefix='')
-
-@app.route('/folder/<path:folder>')
-def browse_folder(folder):
-    # TÜRKÇE KARAKTER SORUNU ÇÖZÜMÜ
-    # Gelen 'folder' yolunu URL kodlamasından tamamen arındır
-    decoded_folder = unquote(folder)
-    prefix = decoded_folder.rstrip('/') + '/'
-    return list_objects(prefix=prefix, current_folder=decoded_folder)
-
-def list_objects(prefix, current_folder=None):
-    paginator = s3.get_paginator('list_objects_v2')
-    page_iterator = paginator.paginate(Bucket=R2_BUCKET, Prefix=prefix, Delimiter='/')
-
-    folders = []
-    files = []
-
-    for page in page_iterator:
-        for common_prefix in page.get('CommonPrefixes', []):
-            folder_name = common_prefix['Prefix'][len(prefix):].rstrip('/')
-            if folder_name:
-                folders.append(folder_name)
-
-        for obj in page.get('Contents', []):
-            key = obj['Key']
-            # .placeholder dosyalarını ve mevcut klasörün kendisini gösterme
-            if key == prefix or key.endswith('/.placeholder') or key.endswith('/'): continue
-            
-            file_name = key[len(prefix):]
-            if '/' in file_name: continue
-
-            url = s3.generate_presigned_url(
-                'get_object', Params={'Bucket': R2_BUCKET, 'Key': key}, ExpiresIn=3600
-            )
-
-            ext = get_ext(file_name)
-            icon = DOC_ICON_MAP.get(ext, 'bi-file-earmark')
-            is_image = ext in IMAGE_EXTS # RESİM ÖNİZLEME İÇİN KONTROL
-
-            files.append({
-                'name': file_name,
-                'key': key,
-                'url': url,
-                'size_h': human_size(obj['Size']),
-                'icon': icon,
-                'is_image': is_image # Şablona gönderilecek veri
-            })
-
-    folders.sort(key=lambda x: x.lower())
-    files.sort(key=lambda x: x['name'].lower())
-
-    return render_template_string(
-        HTML,
-        folders=folders,
-        files=files,
-        current_folder=current_folder,
-        breadcrumb=build_breadcrumb(current_folder)
+# --- S3 HELPER ---
+def get_s3_client():
+    return boto3.client(
+        's3',
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        endpoint_url=AWS_ENDPOINT_URL,
+        region_name=AWS_REGION
     )
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    file = request.files.get('file')
-    destination = request.form.get('destination', '')
-    if not file:
-        return jsonify({'success': False, 'error': 'Dosya bulunamadı'}), 400
-
-    filename = secure_filename(file.filename)
-    key = f"{destination}/{filename}" if destination else filename
-    
-    # Dosyanın zaten var olup olmadığını kontrol et
+def list_files(prefix='', continuation_token=''):
+    s3 = get_s3_client()
     try:
-        s3.head_object(Bucket=R2_BUCKET, Key=key)
-        return jsonify({'success': False, 'error': f"'{filename}' adında bir dosya zaten var."}), 409 # 409 Conflict
-    except s3.exceptions.ClientError as e:
-        if e.response['Error']['Code'] == '404':
-             # Dosya yok, yüklemeye devam et
-            pass
-        else:
-            # Başka bir client hatası
-            return jsonify({'success': False, 'error': str(e)}), 500
+        kwargs = {'Bucket': AWS_BUCKET_NAME, 'Prefix': prefix, 'Delimiter': '/'}
+        if continuation_token:
+            kwargs['ContinuationToken'] = continuation_token
             
+        response = s3.list_objects_v2(**kwargs)
+    except ClientError as e:
+        return [], [], None, str(e)
+
+    folders = []
+    if 'CommonPrefixes' in response:
+        for p in response['CommonPrefixes']:
+            folder_name = p['Prefix'][len(prefix):]
+            folders.append({'name': folder_name, 'path': p['Prefix']})
+
+    files = []
+    if 'Contents' in response:
+        for obj in response['Contents']:
+            key = obj['Key']
+            if key == prefix: continue # Skip the folder marker itself
+            filename = key[len(prefix):]
+            
+            # Formate size
+            size = obj['Size']
+            for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+                if size < 1024:
+                    size_str = f"{size:.1f} {unit}"
+                    break
+                size /= 1024
+            
+            files.append({
+                'name': filename,
+                'path': key,
+                'size': size_str,
+                'last_modified': obj['LastModified']
+            })
+    
+    next_token = response.get('NextContinuationToken')
+            
+    return folders, files, next_token, None
+
+# --- HTML TEMPLATE ---
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S3 Manager Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .drag-area { border: 2px dashed #cbd5e1; transition: all 0.3s ease; }
+        .drag-area.active { border-color: #3b82f6; background-color: #eff6ff; }
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+
+    <!-- Top Navigation -->
+    <nav class="bg-white shadow-sm border-b border-slate-200 fixed w-full top-0 z-50">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex">
+                    <div class="flex-shrink-0 flex items-center">
+                        <a href="/" class="text-2xl font-bold text-blue-600 hover:text-blue-700 transition-colors">
+                            <i class="fa-brands fa-aws mr-2"></i>S3 Manager
+                        </a>
+                    </div>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <div class="text-xs text-slate-500 bg-slate-100 px-3 py-1 rounded-full">
+                        <i class="fa-solid fa-server mr-1"></i> Bucket: <span class="font-medium text-slate-700">{{ bucket_name }}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-24 pb-12">
+        
+        <!-- Flash Messages -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            <div class="mb-6">
+              {% for category, message in messages %}
+                <div class="p-4 mb-2 rounded-lg shadow-sm border
+                    {% if category == 'error' %} bg-red-50 border-red-200 text-red-700
+                    {% else %} bg-green-50 border-green-200 text-green-700 {% endif %} flex items-center">
+                    <i class="fa-solid {% if category == 'error' %}fa-circle-exclamation{% else %}fa-circle-check{% endif %} mr-2"></i>
+                    {{ message }}
+                </div>
+              {% endfor %}
+            </div>
+          {% endif %}
+        {% endwith %}
+
+        <!-- Actions Bar -->
+        <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+            <!-- Breadcrumbs -->
+            <nav class="flex text-slate-500 overflow-x-auto whitespace-nowrap pb-1 md:pb-0">
+                <a href="{{ url_for('index') }}" class="hover:text-blue-600 transition-colors flex items-center">
+                    <i class="fa-solid fa-house mr-1"></i> Home
+                </a>
+                {% set parts = prefix.strip('/').split('/') %}
+                {% set current_path = namespace(value='') %}
+                {% if prefix %}
+                    {% for part in parts %}
+                        {% if part %}
+                            {% set current_path.value = current_path.value + part + '/' %}
+                            <span class="mx-2 text-slate-300">/</span>
+                            <a href="{{ url_for('index', prefix=current_path.value) }}" class="font-medium hover:text-blue-600 transition-colors text-slate-700">
+                                {{ part }}
+                            </a>
+                        {% endif %}
+                    {% endfor %}
+                {% endif %}
+            </nav>
+
+            <div class="flex items-center space-x-2">
+                <button onclick="document.getElementById('newFolderModal').classList.remove('hidden')" class="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-50 hover:text-blue-600 transition-all text-sm font-medium shadow-sm">
+                    <i class="fa-solid fa-folder-plus mr-2"></i>New Folder
+                </button>
+                
+                <!-- Upload Buttons Group -->
+                <div class="relative inline-block text-left group">
+                    <button class="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-all text-sm font-medium shadow-md hover:shadow-lg flex items-center">
+                        <i class="fa-solid fa-cloud-arrow-up mr-2"></i>Upload
+                        <i class="fa-solid fa-chevron-down ml-2 text-xs"></i>
+                    </button>
+                    <!-- Dropdown -->
+                    <div class="hidden group-hover:block absolute right-0 mt-0 w-48 bg-white rounded-md shadow-lg py-1 z-20 border border-slate-100">
+                        <a href="#" onclick="document.getElementById('uploadModal').classList.remove('hidden'); setupUpload('file')" class="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                            <i class="fa-solid fa-file mr-2 text-slate-400"></i> Upload Files
+                        </a>
+                        <a href="#" onclick="document.getElementById('uploadModal').classList.remove('hidden'); setupUpload('folder')" class="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                            <i class="fa-solid fa-folder mr-2 text-slate-400"></i> Upload Folder
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- File Browser -->
+        <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mb-6">
+            {% if not folders and not files %}
+                <div class="p-12 text-center text-slate-400">
+                    <i class="fa-regular fa-folder-open text-6xl mb-4 text-slate-200"></i>
+                    <p class="text-lg">This folder is empty</p>
+                    <p class="text-sm mt-2">Upload files or create a new folder to get started.</p>
+                </div>
+            {% else %}
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm text-slate-600">
+                        <thead class="bg-slate-50 text-xs uppercase font-semibold text-slate-500 border-b border-slate-200">
+                            <tr>
+                                <th class="px-6 py-4 rounded-tl-lg">Name</th>
+                                <th class="px-6 py-4">Size</th>
+                                <th class="px-6 py-4">Last Modified</th>
+                                <th class="px-6 py-4 text-right rounded-tr-lg">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100">
+                            <!-- Folders -->
+                            {% for folder in folders %}
+                            <tr class="hover:bg-slate-50 transition-colors group">
+                                <td class="px-6 py-3 whitespace-nowrap cursor-pointer" onclick="window.location.href='{{ url_for('index', prefix=folder.path) }}'">
+                                    <div class="flex items-center text-slate-700 font-medium">
+                                        <i class="fa-solid fa-folder text-yellow-400 text-2xl mr-3"></i>
+                                        {{ folder.name }}
+                                    </div>
+                                </td>
+                                <td class="px-6 py-3 text-slate-400">-</td>
+                                <td class="px-6 py-3 text-slate-400">-</td>
+                                <td class="px-6 py-3 text-right space-x-1">
+                                    <button onclick="event.stopPropagation(); openRenameModal('{{ folder.path }}')" class="text-slate-400 hover:text-orange-500 px-2 py-1 rounded transition-colors" title="Rename Folder">
+                                        <i class="fa-solid fa-pen-to-square"></i>
+                                    </button>
+                                     <form action="{{ url_for('delete') }}" method="POST" class="inline" onsubmit="return confirm('Delete folder {{ folder.name }} and all its contents?');">
+                                        <input type="hidden" name="key" value="{{ folder.path }}">
+                                        <input type="hidden" name="prefix" value="{{ prefix }}">
+                                        <button type="submit" class="text-slate-400 hover:text-red-500 px-2 py-1 rounded transition-colors" title="Delete Folder">
+                                            <i class="fa-regular fa-trash-can"></i>
+                                        </button>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% endfor %}
+
+                            <!-- Files -->
+                            {% for file in files %}
+                            <tr class="hover:bg-slate-50 transition-colors group">
+                                <td class="px-6 py-3 font-medium text-slate-700">
+                                    <div class="flex items-center space-x-3">
+                                        <!-- Preview Click -->
+                                        <button onclick="openPreview('{{ file.path }}', '{{ file.name }}')" class="w-8 h-8 rounded-lg bg-slate-100 text-slate-500 hover:text-blue-600 hover:bg-blue-50 flex items-center justify-center text-lg transition-colors" title="Preview">
+                                           {% if file.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')) %} 
+                                                <i class="fa-regular fa-image"></i>
+                                           {% elif file.name.lower().endswith(('.pdf')) %}
+                                                <i class="fa-regular fa-file-pdf text-red-500"></i>
+                                           {% elif file.name.lower().endswith(('.mp4', '.webm', '.mov')) %}
+                                                <i class="fa-regular fa-file-video text-blue-500"></i>
+                                           {% else %}
+                                                <i class="fa-regular fa-file"></i>
+                                           {% endif %}
+                                        </button>
+                                        
+                                        <!-- New Tab Click -->
+                                        <button onclick="openInNewTab('{{ file.path }}')" class="hover:text-blue-600 hover:underline text-left">
+                                            {{ file.name }}
+                                        </button>
+                                    </div>
+                                </td>
+                                <td class="px-6 py-3">{{ file.size }}</td>
+                                <td class="px-6 py-3">{{ file.last_modified.strftime('%Y-%m-%d %H:%M') }}</td>
+                                <td class="px-6 py-3 text-right space-x-1">
+                                    <button onclick="openRenameModal('{{ file.path }}')" class="text-slate-400 hover:text-orange-500 px-2 py-1 rounded transition-colors" title="Rename/Move">
+                                        <i class="fa-solid fa-pen-to-square"></i>
+                                    </button>
+                                    <button onclick="copyLink('{{ file.path }}')" class="text-slate-400 hover:text-green-600 px-2 py-1 rounded transition-colors" title="Copy Link">
+                                        <i class="fa-solid fa-link"></i>
+                                    </button>
+                                    <a href="{{ url_for('download', key=file.path) }}" class="text-slate-400 hover:text-blue-600 px-2 py-1 rounded transition-colors" title="Download">
+                                        <i class="fa-solid fa-download"></i>
+                                    </a>
+                                    <form action="{{ url_for('delete') }}" method="POST" class="inline" onsubmit="return confirm('Delete file {{ file.name }}?');">
+                                        <input type="hidden" name="key" value="{{ file.path }}">
+                                        <input type="hidden" name="prefix" value="{{ prefix }}">
+                                        <button type="submit" class="text-slate-400 hover:text-red-500 px-2 py-1 rounded transition-colors" title="Delete">
+                                            <i class="fa-regular fa-trash-can"></i>
+                                        </button>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% endif %}
+        </div>
+        
+        <!-- Infinite Scroll Sentinel -->
+        <div id="sentinel" data-next-token="{{ next_token if next_token else '' }}" class="h-20 text-center py-8">
+            {% if next_token %}
+             <div id="loadingSpinner" class="text-slate-400 text-sm">
+                <i class="fa-solid fa-circle-notch fa-spin mr-2"></i> Loading more files...
+             </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Upload Modal -->
+    <div id="uploadModal" class="hidden fixed inset-0 z-50 overflow-y-auto" aria-labelledby="modal-title" role="dialog" aria-modal="true">
+        <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div class="fixed inset-0 bg-slate-900 bg-opacity-75 transition-opacity" aria-hidden="true" onclick="handleModalClose()"></div>
+            <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+            <div class="inline-block align-bottom bg-white rounded-xl text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+                <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                    <h3 class="text-lg leading-6 font-medium text-slate-900 mb-4" id="uploadModalTitle">Upload File</h3>
+                    
+                    <!-- Custom Path Input -->
+                    <div class="mb-4">
+                        <label class="block text-xs font-medium text-slate-500 uppercase mb-1">Upload To (Folder Path)</label>
+                        <div class="relative rounded-md shadow-sm">
+                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                <span class="text-slate-400 sm:text-sm">/</span>
+                            </div>
+                            <input type="text" id="targetPathInput" class="focus:ring-blue-500 focus:border-blue-500 block w-full pl-7 sm:text-sm border-slate-300 rounded-md border p-2" placeholder="folder/subfolder">
+                        </div>
+                        <p class="text-xs text-slate-400 mt-1">Leave empty for root, or type a folder path (e.g. 'images/2024'). Will be created if it doesn't exist.</p>
+                    </div>
+
+                    <div id="uploadUi">
+                        <div class="drag-area w-full h-40 rounded-xl bg-slate-50 flex flex-col items-center justify-center text-slate-400 mb-4 cursor-pointer relative" id="dragArea">
+                            <input type="file" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" id="fileInput" onchange="filesSelected(this)" multiple>
+                            <i class="fa-solid fa-cloud-arrow-up text-4xl mb-2"></i>
+                            <p class="text-sm font-medium" id="dropText">Drag & Drop or Click to Browse</p>
+                            <p class="text-xs text-slate-400 mt-1" id="fileStats"></p>
+                        </div>
+                    </div>
+                    
+                    <!-- Total Progress -->
+                    <div id="totalProgress" class="hidden mb-6 bg-blue-50 p-4 rounded-xl border border-blue-100">
+                        <div class="flex justify-between text-sm font-bold text-blue-900 mb-2">
+                            <span id="totalText">Preparing...</span>
+                            <span id="totalPercent">0%</span>
+                        </div>
+                        <div class="w-full bg-blue-200 rounded-full h-3">
+                            <div id="totalBar" class="bg-blue-600 h-3 rounded-full transition-all duration-300 shadow-sm" style="width: 0%"></div>
+                        </div>
+                    </div>
+
+                    <!-- Individual Progress Container -->
+                    <div id="progressContainer" class="max-h-60 overflow-y-auto hidden space-y-3 mb-4 pr-2">
+                        <!-- Progress items will be injected here -->
+                    </div>
+
+                    <div class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
+                        <button type="button" id="startUploadBtn" class="hidden w-full inline-flex justify-center rounded-lg border border-transparent shadow-sm px-4 py-2 bg-green-600 text-base font-medium text-white hover:bg-green-700 focus:outline-none sm:col-start-2 sm:text-sm" onclick="startUpload()">
+                            Start Upload
+                        </button>
+                        <button type="button" id="closeBtn" class="w-full inline-flex justify-center rounded-lg border border-slate-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-slate-700 hover:bg-slate-50 focus:outline-none sm:col-start-1 sm:text-sm" onclick="handleModalClose()">
+                            Close
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Rename Modal -->
+    <div id="renameModal" class="hidden fixed inset-0 z-50 overflow-y-auto">
+        <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div class="fixed inset-0 bg-slate-900 bg-opacity-75" onclick="document.getElementById('renameModal').classList.add('hidden')"></div>
+            <span class="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
+            <div class="inline-block align-bottom bg-white rounded-xl text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+                <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                    <h3 class="text-lg leading-6 font-medium text-slate-900 mb-4">Rename / Move File</h3>
+                    <form action="{{ url_for('rename') }}" method="POST">
+                        <input type="hidden" name="old_key" id="renameOldKey">
+                        <div class="mb-4">
+                            <label for="renameNewKey" class="block text-sm font-medium text-slate-700 mb-2">New Path (Folder + Filename)</label>
+                            <input type="text" name="new_key" id="renameNewKey" class="shadow-sm focus:ring-blue-500 focus:border-blue-500 block w-full sm:text-sm border-slate-300 rounded-md p-2 border font-mono text-sm" required>
+                            <p class="text-xs text-slate-500 mt-2">Example: <code>folder/newname.jpg</code> or just <code>newname.jpg</code> to move to root.</p>
+                        </div>
+                        <div class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
+                            <button type="submit" class="w-full inline-flex justify-center rounded-lg border border-transparent shadow-sm px-4 py-2 bg-orange-600 text-base font-medium text-white hover:bg-orange-700 focus:outline-none sm:col-start-2 sm:text-sm">
+                                Rename / Move
+                            </button>
+                            <button type="button" class="mt-3 w-full inline-flex justify-center rounded-lg border border-slate-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-slate-700 hover:bg-slate-50 focus:outline-none sm:mt-0 sm:col-start-1 sm:text-sm" onclick="document.getElementById('renameModal').classList.add('hidden')">
+                                Cancel
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Preview Modal -->
+    <div id="previewModal" class="hidden fixed inset-0 z-50 overflow-y-auto">
+        <div class="flex items-center justify-center min-h-screen px-4 pt-4 pb-20 text-center sm:block sm:p-0">
+            <div class="fixed inset-0 bg-slate-900 bg-opacity-90 transition-opacity" onclick="closePreview()"></div>
+            <span class="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
+            <div class="inline-block align-middle bg-transparent rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:max-w-4xl sm:w-full relative group">
+                
+                 <!-- Nav Buttons (Desktop) -->
+                 <button onclick="showPrevPreview()" class="absolute left-0 top-1/2 -translate-y-1/2 text-white/50 hover:text-white text-4xl p-4 hidden md:block z-50 focus:outline-none">
+                    <i class="fa-solid fa-chevron-left"></i>
+                 </button>
+                 <button onclick="showNextPreview()" class="absolute right-0 top-1/2 -translate-y-1/2 text-white/50 hover:text-white text-4xl p-4 hidden md:block z-50 focus:outline-none">
+                    <i class="fa-solid fa-chevron-right"></i>
+                 </button>
+
+                <div class="relative bg-white rounded-lg overflow-hidden">
+                    <div class="flex justify-between items-center p-4 border-b border-slate-200 bg-slate-50">
+                        <h3 class="text-lg font-medium text-slate-900 truncate pr-4" id="previewTitle">File Preview</h3>
+                        <button type="button" class="text-slate-400 hover:text-slate-500 focus:outline-none" onclick="closePreview()">
+                            <span class="sr-only">Close</span>
+                           <i class="fa-solid fa-xmark text-xl"></i>
+                        </button>
+                    </div>
+                    <div class="p-4 bg-slate-100 flex justify-center items-center min-h-[300px] max-h-[80vh] overflow-auto" id="previewContent">
+                        <!-- Content injected by JS -->
+                        <i class="fa-solid fa-circle-notch fa-spin text-4xl text-blue-500"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- New Folder Modal -->
+    <div id="newFolderModal" class="hidden fixed inset-0 z-50 overflow-y-auto">
+        <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+            <div class="fixed inset-0 bg-slate-900 bg-opacity-75" onclick="document.getElementById('newFolderModal').classList.add('hidden')"></div>
+            <span class="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
+            <div class="inline-block align-bottom bg-white rounded-xl text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+                <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                    <h3 class="text-lg leading-6 font-medium text-slate-900 mb-4">Create New Folder</h3>
+                    <form action="{{ url_for('mkdir') }}" method="POST">
+                        <input type="hidden" name="prefix" value="{{ prefix }}">
+                        <div class="mb-4">
+                            <label for="folderName" class="block text-sm font-medium text-slate-700 mb-2">Folder Name</label>
+                            <input type="text" name="folder_name" id="folderName" class="shadow-sm focus:ring-blue-500 focus:border-blue-500 block w-full sm:text-sm border-slate-300 rounded-md p-2 border" placeholder="e.g., images" required>
+                        </div>
+                        <div class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
+                            <button type="submit" class="w-full inline-flex justify-center rounded-lg border border-transparent shadow-sm px-4 py-2 bg-blue-600 text-base font-medium text-white hover:bg-blue-700 focus:outline-none sm:col-start-2 sm:text-sm">
+                                Create
+                            </button>
+                            <button type="button" class="mt-3 w-full inline-flex justify-center rounded-lg border border-slate-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-slate-700 hover:bg-slate-50 focus:outline-none sm:mt-0 sm:col-start-1 sm:text-sm" onclick="document.getElementById('newFolderModal').classList.add('hidden')">
+                                Cancel
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="fixed bottom-4 right-4 bg-slate-800 text-white px-6 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition-all duration-300 z-50">
+        <i class="fa-solid fa-circle-check text-green-400 mr-2"></i>
+        <span id="toastMessage">Notification</span>
+    </div>
+
+    <script>
+        const PREFIX = new URLSearchParams(window.location.search).get('prefix') || '';
+        let totalFiles = 0;
+        let uploadedFiles = 0;
+        let successfulUploadsCount = 0; // New tracker for reload decision
+        
+        // Concurrency Control
+        const MAX_CONCURRENT_UPLOADS = 3;
+        let activeUploads = 0;
+        let uploadQueue = [];
+        let isUploading = false; // Flag to check if start button pressed
+
+        // --- INIT ---
+        document.addEventListener('DOMContentLoaded', () => {
+             setupInfiniteScroll();
+             setupPaste();
+        });
+
+        // --- INFINITE SCROLL ---
+        function setupInfiniteScroll() {
+            const sentinel = document.getElementById('sentinel');
+            if (!sentinel) return;
+
+            const observer = new IntersectionObserver((entries) => {
+                if (entries[0].isIntersecting) {
+                    const nextToken = sentinel.dataset.nextToken;
+                    if (nextToken) {
+                        loadMoreFiles(nextToken);
+                    }
+                }
+            });
+            observer.observe(sentinel);
+        }
+
+        async function loadMoreFiles(token) {
+            const sentinel = document.getElementById('sentinel');
+            const spinner = document.getElementById('loadingSpinner');
+            
+            // Prevent multiple triggers
+            if (sentinel.dataset.loading === 'true') return;
+            sentinel.dataset.loading = 'true';
+
+            try {
+                // Construct URL for next page
+                const url = new URL(window.location.href);
+                url.searchParams.set('continuation_token', token);
+                
+                const res = await fetch(url.toString());
+                const text = await res.text();
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(text, 'text/html');
+                
+                // Extract new rows
+                const newRows = doc.querySelectorAll('tbody tr');
+                const tbody = document.querySelector('tbody');
+                newRows.forEach(row => tbody.appendChild(row));
+                
+                // Update Token
+                const newSentinel = doc.getElementById('sentinel');
+                const newNextToken = newSentinel ? newSentinel.dataset.nextToken : null;
+                
+                if (newNextToken) {
+                    sentinel.dataset.nextToken = newNextToken;
+                    sentinel.dataset.loading = 'false';
+                } else {
+                    sentinel.removeAttribute('data-next-token');
+                    sentinel.innerHTML = '<span class="text-xs text-slate-300">End of list</span>';
+                    // Stop observing
+                }
+
+            } catch (err) {
+                console.error("Scroll failed", err);
+                sentinel.dataset.loading = 'false';
+                 // Retry logic could go here
+            }
+        }
+
+        // --- PASTE SUPPORT ---
+        function setupPaste() {
+            document.addEventListener('paste', (e) => {
+                const items = e.clipboardData.items;
+                const fileList = [];
+                
+                for (let i = 0; i < items.length; i++) {
+                   if (items[i].kind === 'file') {
+                       const file = items[i].getAsFile();
+                       if (file) fileList.push(file);
+                   }
+                }
+                
+                if (fileList.length > 0) {
+                    // Open modal if not open? Or just queue if open?
+                    // Let's open modal and start
+                     document.getElementById('uploadModal').classList.remove('hidden');
+                     
+                     // Mock input-like object
+                     const mockInput = { files: fileList };
+                     filesSelected(mockInput);
+                }
+            });
+        }
+
+        function setupUpload(type) {
+            const title = document.getElementById('uploadModalTitle');
+            const input = document.getElementById('fileInput');
+            const dropText = document.getElementById('dropText');
+            
+            // Reset state
+            activeUploads = 0;
+            uploadQueue = [];
+            isUploading = false;
+            totalFiles = 0;
+            uploadedFiles = 0;
+            successfulUploadsCount = 0;
+            
+            document.getElementById('uploadUi').classList.remove('hidden');
+            document.getElementById('progressContainer').classList.add('hidden');
+            document.getElementById('progressContainer').innerHTML = ''; // Clear items
+            document.getElementById('totalProgress').classList.add('hidden');
+            document.getElementById('startUploadBtn').classList.add('hidden');
+            document.getElementById('closeBtn').classList.remove('bg-green-600', 'text-white', 'hover:bg-green-700');
+            document.getElementById('closeBtn').classList.add('bg-white', 'text-slate-700', 'border-slate-300');
+            document.getElementById('closeBtn').textContent = "Close";
+            
+            document.getElementById('targetPathInput').value = PREFIX;
+            
+            const newInput = input.cloneNode(true);
+            input.parentNode.replaceChild(newInput, input);
+            newInput.addEventListener('change', function() { filesSelected(this); });
+            
+            if (type === 'folder') {
+                title.textContent = 'Upload Folder';
+                dropText.textContent = 'Drag & Drop a Folder here';
+                newInput.setAttribute('webkitdirectory', '');
+                newInput.setAttribute('directory', '');
+            } else {
+                title.textContent = 'Upload Files';
+                dropText.textContent = 'Drag & Drop Files here or Paste (Ctrl+V)';
+                newInput.removeAttribute('webkitdirectory');
+                newInput.removeAttribute('directory');
+            }
+            
+            document.getElementById('uploadModal').classList.remove('hidden');
+        }
+
+        async function filesSelected(input) {
+            if (!input.files || input.files.length === 0) return;
+            
+            const files = Array.from(input.files);
+            
+            document.getElementById('uploadUi').classList.add('hidden');
+            document.getElementById('totalProgress').classList.remove('hidden'); 
+            document.getElementById('progressContainer').classList.remove('hidden');
+            document.getElementById('startUploadBtn').classList.remove('hidden'); // Show START
+            
+            // Add to queue
+            const container = document.getElementById('progressContainer');
+            
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const id = 'prog-' + Date.now() + '-' + i;
+                
+                // Track total
+                totalFiles++;
+                
+                const el = document.createElement('div');
+                el.id = 'el-' + id;
+                el.innerHTML = `
+                    <div class="text-xs text-slate-500 flex justify-between mb-1 items-center">
+                        <div class="truncate w-3/4 font-mono flex items-center">
+                            <span class="mr-2 cursor-pointer text-red-400 hover:text-red-600 remove-btn" onclick="removeFromQueue('${id}')"><i class="fa-solid fa-xmark"></i></span>
+                            ${file.name}
+                        </div>
+                        <div class="text-right">
+                             <span id="${id}-speed" class="text-slate-300 mr-2 text-[10px]"></span>
+                             <span id="${id}-pct">Pending</span>
+                        </div>
+                    </div>
+                    <div class="w-full bg-slate-200 rounded-full h-2">
+                        <div id="${id}-bar" class="bg-slate-300 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                    </div>
+                `;
+                container.appendChild(el);
+                
+                uploadQueue.push({ 
+                    file, 
+                    id, 
+                    retries: 0,
+                    lastLoaded: 0,
+                    lastTime: Date.now()
+                });
+            }
+            
+            updateTotalProgress();
+        }
+        
+        function removeFromQueue(id) {
+            if (isUploading) return; 
+            
+            const idx = uploadQueue.findIndex(item => item.id === id);
+            if (idx > -1) {
+                uploadQueue.splice(idx, 1);
+                document.getElementById('el-' + id).remove();
+                totalFiles--;
+                updateTotalProgress();
+                
+                if (totalFiles === 0) {
+                     // Reset UI if empty
+                     document.getElementById('uploadUi').classList.remove('hidden');
+                     document.getElementById('totalProgress').classList.add('hidden');
+                     document.getElementById('startUploadBtn').classList.add('hidden');
+                }
+            }
+        }
+        
+        function startUpload() {
+            if (uploadQueue.length === 0) return;
+            
+            isUploading = true;
+            document.getElementById('startUploadBtn').classList.add('hidden');
+            
+            // Hide remove buttons
+            const removeBtns = document.querySelectorAll('.remove-btn');
+            removeBtns.forEach(el => el.style.display = 'none');
+            
+            processQueue();
+        }
+        
+        function updateTotalProgress() {
+            // Prevent NaN
+            const pct = totalFiles > 0 ? Math.round((uploadedFiles / totalFiles) * 100) : 0;
+            const bar = document.getElementById('totalBar');
+            const text = document.getElementById('totalText');
+            const pctText = document.getElementById('totalPercent');
+            
+            // Cap at 100% just in case
+            const displayPct = Math.min(pct, 100);
+            
+            bar.style.width = displayPct + '%';
+            text.textContent = `Uploaded ${uploadedFiles} of ${totalFiles} files`;
+            pctText.textContent = displayPct + '%';
+            
+            if (uploadedFiles >= totalFiles && totalFiles > 0 && isUploading) {
+                bar.classList.add('bg-green-500');
+            } else {
+                 bar.classList.remove('bg-green-500');
+            }
+        }
+
+        function processQueue() {
+            // Keep going as long as we have concurrency slots and items
+            while (activeUploads < MAX_CONCURRENT_UPLOADS && uploadQueue.length > 0) {
+                const item = uploadQueue.shift();
+                activeUploads++;
+                uploadFile(item);
+            }
+            
+            if (uploadQueue.length === 0 && activeUploads === 0 && isUploading) {
+                checkAllDone();
+            }
+        }
+
+        async function uploadFile(item) {
+            const { file, id } = item;
+            const bar = document.getElementById(id + '-bar');
+            const pct = document.getElementById(id + '-pct');
+            const speedEl = document.getElementById(id + '-speed');
+            
+            // Read TARGET PATH from input
+            let targetPrefix = document.getElementById('targetPathInput').value.trim();
+            if (targetPrefix && !targetPrefix.endsWith('/')) targetPrefix += '/';
+            if (targetPrefix.startsWith('/')) targetPrefix = targetPrefix.substring(1);
+            
+            bar.classList.remove('bg-slate-300');
+            bar.classList.add('bg-blue-600');
+            pct.textContent = 'Starting...';
+
+            let filename = file.name;
+            if (file.webkitRelativePath) {
+                filename = file.webkitRelativePath;
+            }
+            
+            try {
+                // 1. Get Presigned URL
+                const res = await fetch('/get_upload_link', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ 
+                        filename: filename,
+                        prefix: targetPrefix 
+                    })
+                });
+                
+                if (res.status === 409) {
+                     activeUploads--;
+                     uploadedFiles++; 
+                     
+                     bar.classList.remove('bg-blue-600');
+                     bar.classList.add('bg-yellow-400');
+                     bar.style.width = '100%';
+                     pct.innerHTML = '<span class="text-yellow-600 font-bold">Skipped</span>';
+                     speedEl.textContent = '';
+                     
+                     updateTotalProgress();
+                     processQueue();
+                     return;
+                }
+                
+                if (!res.ok) throw new Error('Sign fail');
+                const data = await res.json();
+                
+                // 2. Direct PUT to S3
+                const xhr = new XMLHttpRequest();
+                xhr.open('PUT', data.url, true);
+                xhr.setRequestHeader('Content-Type', data.content_type);
+                
+                xhr.upload.onprogress = (e) => {
+                    if (e.lengthComputable) {
+                        const now = Date.now();
+                        const timeDiff = (now - item.lastTime) / 1000; // seconds
+                        
+                        if (timeDiff >= 0.5) { // Update speed every 0.5s
+                            const loadedDiff = e.loaded - item.lastLoaded;
+                            const speedBytes = loadedDiff / timeDiff;
+                            const speedMB = (speedBytes / (1024 * 1024)).toFixed(1);
+                            
+                            speedEl.textContent = `${speedMB} MB/s`;
+                            
+                            item.lastLoaded = e.loaded;
+                            item.lastTime = now;
+                        }
+
+                        const percent = Math.round((e.loaded / e.total) * 100);
+                        bar.style.width = percent + '%';
+                        pct.textContent = percent + '%';
+                    }
+                };
+                
+                xhr.onload = () => {
+                    activeUploads--;
+                    if (xhr.status === 200) {
+                        bar.classList.add('bg-green-500');
+                        bar.classList.remove('bg-blue-600');
+                        pct.innerHTML = '<i class="fa-solid fa-check text-green-500"></i>';
+                        speedEl.textContent = '';
+                        
+                        // Increment counts ONLY ON SUCCESS
+                        uploadedFiles++;
+                        successfulUploadsCount++;
+                        updateTotalProgress();
+                        processQueue(); 
+                    } else {
+                        handleError(item, 'HTTP ' + xhr.status);
+                    }
+                };
+                
+                xhr.onerror = () => {
+                     activeUploads--;
+                     handleError(item, 'Net Err');
+                };
+                
+                xhr.send(file);
+                
+            } catch (err) {
+                activeUploads--;
+                handleError(item, 'Fail');
+            }
+        }
+
+        function handleError(item, msg) {
+            const { id, retries } = item;
+            const bar = document.getElementById(id + '-bar');
+            const pct = document.getElementById(id + '-pct');
+             const speedEl = document.getElementById(id + '-speed');
+             speedEl.textContent = '';
+
+            if (retries < 3) {
+                pct.textContent = `Retry ${retries+1}...`;
+                // Reset stats for retry
+                item.retries++;
+                item.lastLoaded = 0;
+                item.lastTime = Date.now();
+                
+                uploadQueue.unshift(item); 
+                setTimeout(() => {
+                    processQueue(); 
+                }, 1000);
+            } else {
+                bar.classList.remove('bg-blue-600');
+                bar.classList.add('bg-red-500');
+                pct.textContent = msg;
+                // DO NOT increment uploadedFiles here. 
+                // But we should "processQueue" to not stall others.
+                // Should we mark "totalFiles" down? 
+                // Or denote failure count? For now just keep totals but progress won't reach 100%
+                processQueue();
+            }
+        }
+
+        function checkAllDone() {
+            if (activeUploads === 0 && uploadQueue.length === 0) {
+                 if (uploadedFiles === totalFiles) {
+                    document.getElementById('closeBtn').innerHTML = "All Done - Refresh Page";
+                    document.getElementById('closeBtn').classList.add('bg-green-600', 'text-white', 'hover:bg-green-700');
+                } else {
+                     document.getElementById('closeBtn').innerHTML = "Completed with Errors";
+                }
+            }
+        }
+        
+        function handleModalClose() {
+             // If we did uploads, reload to show them.
+             if (successfulUploadsCount > 0) {
+                 location.reload();
+             } else {
+                 document.getElementById('uploadModal').classList.add('hidden');
+                 // Reset UI for next time?
+                 document.getElementById('uploadUi').classList.remove('hidden');
+                 document.getElementById('totalProgress').classList.add('hidden');
+                 document.getElementById('progressContainer').classList.add('hidden');
+             }
+        }
+        
+        // --- NEW FEATURES ---
+
+        function openRenameModal(key) {
+            document.getElementById('renameModal').classList.remove('hidden');
+            document.getElementById('renameOldKey').value = key;
+            document.getElementById('renameNewKey').value = key; // Pre-fill
+        }
+
+        async function openInNewTab(key) {
+             try {
+                const response = await fetch(`/get_link?key=${encodeURIComponent(key)}`);
+                const data = await response.json();
+                if (data.url) {
+                    window.open(data.url, '_blank');
+                } else {
+                    showToast('Failed to get link', true);
+                }
+            } catch (err) {
+                showToast('Error opening file', true);
+            }
+        }
+
+        // --- PREVIEW NAVIGATION ---
+        let previewFilesList = [];
+        let currentPreviewIndex = -1;
+        let touchStartX = 0;
+        let touchEndX = 0;
+
+        document.addEventListener('keydown', (e) => {
+            if (document.getElementById('previewModal').classList.contains('hidden')) return;
+            
+            if (e.key === 'ArrowLeft') showPrevPreview();
+            if (e.key === 'ArrowRight') showNextPreview();
+            if (e.key === 'Escape') closePreview();
+        });
+        
+        const previewModal = document.getElementById('previewModal');
+        previewModal.addEventListener('touchstart', e => {
+            touchStartX = e.changedTouches[0].screenX;
+        });
+        
+        previewModal.addEventListener('touchend', e => {
+            touchEndX = e.changedTouches[0].screenX;
+            handleSwipe();
+        });
+        
+        function handleSwipe() {
+            if (touchEndX < touchStartX - 50) showNextPreview();
+            if (touchEndX > touchStartX + 50) showPrevPreview();
+        }
+
+        function refreshPreviewList() {
+            // Collect all viewable files currently in the DOM
+            // We look for button onclick="openPreview(...)"
+            const btns = document.querySelectorAll('button[onclick^="openPreview"]');
+            previewFilesList = [];
+            btns.forEach((btn, index) => {
+                // Parse the onclick attribute to get key and name
+                // onclick="openPreview('key', 'name')"
+                const match = btn.getAttribute('onclick').match(/openPreview\('([^']*)', '([^']*)'\)/);
+                if (match) {
+                    previewFilesList.push({
+                        key: match[1],
+                        name: match[2],
+                        index: index
+                    });
+                }
+            });
+        }
+
+        async function openPreview(key, name) {
+            refreshPreviewList();
+            
+            // Find current index
+            currentPreviewIndex = previewFilesList.findIndex(f => f.key === key);
+            
+            await loadPreviewContent(key, name);
+            document.getElementById('previewModal').classList.remove('hidden');
+        }
+        
+        function showNextPreview() {
+            if (currentPreviewIndex === -1 || previewFilesList.length === 0) return;
+            currentPreviewIndex = (currentPreviewIndex + 1) % previewFilesList.length;
+            const item = previewFilesList[currentPreviewIndex];
+            loadPreviewContent(item.key, item.name);
+        }
+
+        function showPrevPreview() {
+            if (currentPreviewIndex === -1 || previewFilesList.length === 0) return;
+            currentPreviewIndex = (currentPreviewIndex - 1 + previewFilesList.length) % previewFilesList.length;
+            const item = previewFilesList[currentPreviewIndex];
+            loadPreviewContent(item.key, item.name);
+        }
+        
+        async function loadPreviewContent(key, name) {
+            document.getElementById('previewTitle').textContent = name;
+            const content = document.getElementById('previewContent');
+            content.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin text-4xl text-blue-500"></i>';
+            
+            try {
+                const response = await fetch(`/get_link?key=${encodeURIComponent(key)}`);
+                const data = await response.json();
+                
+                if (data.url) {
+                    const ext = name.split('.').pop().toLowerCase();
+                    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) {
+                        content.innerHTML = `<img src="${data.url}" class="max-w-full max-h-[70vh] rounded shadow-lg select-none" draggable="false">`;
+                    } else if (['mp4', 'webm', 'mov'].includes(ext)) {
+                        content.innerHTML = `<video src="${data.url}" controls autoplay class="max-w-full max-h-[70vh] rounded shadow-lg"></video>`;
+                    } else if (ext === 'pdf') {
+                        content.innerHTML = `<iframe src="${data.url}" class="w-full h-[70vh] rounded border border-slate-200"></iframe>`;
+                    } else {
+                         content.innerHTML = `
+                            <div class="text-center">
+                                <i class="fa-regular fa-file text-6xl text-slate-300 mb-4 block"></i>
+                                <p class="text-slate-500 mb-4">No preview available.</p>
+                                <a href="${data.url}" target="_blank" class="text-blue-600 hover:underline">Download / Open</a>
+                            </div>
+                        `;
+                    }
+                } else {
+                    content.innerHTML = '<p class="text-red-500">Error loading link.</p>';
+                }
+            } catch (err) {
+                content.innerHTML = '<p class="text-red-500">Error loading preview.</p>';
+            }
+        }
+        
+        function closePreview() {
+            document.getElementById('previewModal').classList.add('hidden');
+            document.getElementById('previewContent').innerHTML = ''; 
+        }
+
+        // Feature: Copy Link
+        async function copyLink(key) {
+            try {
+                const response = await fetch(`/get_link?key=${encodeURIComponent(key)}`);
+                const data = await response.json();
+                
+                if (data.url) {
+                    await navigator.clipboard.writeText(data.url);
+                    showToast('Link copied to clipboard!');
+                } else {
+                    showToast('Failed to generate link', true);
+                }
+            } catch (err) {
+                console.error(err);
+                showToast('Error copying link', true);
+            }
+        }
+
+        function showToast(message, isError = false) {
+            const toast = document.getElementById('toast');
+            document.getElementById('toastMessage').textContent = message;
+            
+            if (isError) {
+                toast.classList.add('bg-red-800');
+            } else {
+                toast.classList.remove('bg-red-800');
+            }
+
+            toast.classList.remove('translate-y-20', 'opacity-0');
+            
+            setTimeout(() => {
+                toast.classList.add('translate-y-20', 'opacity-0');
+            }, 3000);
+        }
+    </script>
+</body>
+</html>
+"""
+
+# --- ROUTES ---
+
+# --- ROUTES ---
+
+@app.route('/')
+def index():
+    prefix = request.args.get('prefix', '')
+    continuation_token = request.args.get('continuation_token', '')
+    
+    folders, files, next_token, error = list_files(prefix, continuation_token)
+    
+    if error:
+        flash(f'Error accessing S3: {error}', 'error')
+    
+    return render_template_string(HTML_TEMPLATE, 
+                                  folders=folders, 
+                                  files=files, 
+                                  prefix=prefix, 
+                                  next_token=next_token,
+                                  bucket_name=AWS_BUCKET_NAME)
+
+@app.route('/get_upload_link', methods=['POST'])
+def get_upload_link():
+    data = request.json
+    filename = data.get('filename')
+    prefix = data.get('prefix', '')
+    
+    if not filename:
+        return {"error": "Missing filename"}, 400
+        
+    s3 = get_s3_client()
+    key = prefix + filename
+    
+    print(f"DEBUG: Checking key='{key}'")
     try:
-        s3.upload_fileobj(file, R2_BUCKET, key)
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/rename_file', methods=['POST'])
-def rename_file():
-    data = request.get_json()
-    old_key = data.get('old_key')
-    new_key = data.get('new_key')
-    try:
-        s3.copy_object(Bucket=R2_BUCKET, CopySource={'Bucket': R2_BUCKET, 'Key': old_key}, Key=new_key)
-        s3.delete_object(Bucket=R2_BUCKET, Key=old_key)
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/delete_file', methods=['POST'])
-def delete_file():
-    data = request.get_json()
-    key = data.get('key')
-    try:
-        s3.delete_object(Bucket=R2_BUCKET, Key=key)
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-# YENİ KLASÖR OLUŞTURMA ENDPOINT'İ
-@app.route('/create_new_folder', methods=['POST'])
-def create_new_folder():
-    data = request.get_json()
-    path = data.get('path', '').strip()
-    if not path:
-        return jsonify({'success': False, 'error': 'Klasör adı geçersiz.'}), 400
-
-    # S3/R2'de klasörler, içinde nesne olunca var olur.
-    # Boş bir klasör oluşturmak için sonuna .placeholder gibi bir nesne ekleriz.
-    placeholder_key = f"{path.rstrip('/')}/.placeholder"
+        s3.head_object(Bucket=AWS_BUCKET_NAME, Key=key)
+        print(f"DEBUG: Found existing key='{key}'")
+        return {"error": "File already exists", "exists": True}, 409
+    except ClientError as e:
+        # Check for 404 or NoSuchKey
+        code = e.response.get('Error', {}).get('Code', '')
+        if code != '404' and code != 'NoSuchKey':
+             print(f"DEBUG: Error checking key='{key}': {e}")
+             return {"error": str(e)}, 500
+         # If 404, proceed
     
     try:
-        # Önce bu placeholder'ın var olup olmadığını kontrol etmeye gerek yok,
-        # üzerine yazmak bir sorun teşkil etmez.
-        s3.put_object(Bucket=R2_BUCKET, Key=placeholder_key, Body=b'')
-        return jsonify({'success': True})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        # Generate presigned URL for PUT (Direct Upload)
+        # ContentType is important for the browser to send it correctly
+        content_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+        
+        url = s3.generate_presigned_url(
+            'put_object',
+            Params={
+                'Bucket': AWS_BUCKET_NAME, 
+                'Key': key,
+                'ContentType': content_type
+            },
+            ExpiresIn=3600
+        )
+        return {"url": url, "key": key, "content_type": content_type}
+    except ClientError as e:
+        return {"error": str(e)}, 500
+
+@app.route('/get_link')
+def get_link():
+    s3 = get_s3_client()
+    key = request.args.get('key')
+    
+    if not key:
+        return {"error": "Missing key"}, 400
+        
+    try:
+        url = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': AWS_BUCKET_NAME, 'Key': key},
+            ExpiresIn=3600 * 24
+        )
+        return {"url": url}
+    except ClientError as e:
+        return {"error": str(e)}, 500
+
+@app.route('/mkdir', methods=['POST'])
+def mkdir():
+    s3 = get_s3_client()
+    prefix = request.form.get('prefix', '')
+    folder_name = request.form.get('folder_name', '').strip()
+    
+    if not folder_name:
+        flash('Folder name is required', 'error')
+        return redirect(url_for('index', prefix=prefix))
+        
+    if not folder_name.endswith('/'):
+        folder_name += '/'
+        
+    try:
+        key = prefix + folder_name
+        s3.put_object(Bucket=AWS_BUCKET_NAME, Key=key)
+        flash(f'Folder {folder_name} created!', 'success')
+    except ClientError as e:
+        flash(f'Folder creation failed: {str(e)}', 'error')
+        
+    return redirect(url_for('index', prefix=prefix))
+
+@app.route('/delete', methods=['POST'])
+def delete():
+    s3 = get_s3_client()
+    key = request.form.get('key')
+    prefix = request.form.get('prefix', '')
+    
+    if not key:
+        flash('No key provided for deletion', 'error')
+        return redirect(url_for('index', prefix=prefix))
+        
+    try:
+        if key.endswith('/'):
+            objects_to_delete = s3.list_objects_v2(Bucket=AWS_BUCKET_NAME, Prefix=key)
+            if 'Contents' in objects_to_delete:
+                delete_keys = [{'Key': obj['Key']} for obj in objects_to_delete['Contents']]
+                s3.delete_objects(Bucket=AWS_BUCKET_NAME, Delete={'Objects': delete_keys})
+        else:
+            s3.delete_object(Bucket=AWS_BUCKET_NAME, Key=key)
+            
+        flash(f'Item deleted successfully', 'success')
+    except ClientError as e:
+        flash(f'Deletion failed: {str(e)}', 'error')
+        
+    return redirect(url_for('index', prefix=prefix))
+
+@app.route('/download')
+def download():
+    s3 = get_s3_client()
+    key = request.args.get('key')
+    
+    if not key:
+        return "Missing key", 400
+        
+    try:
+        url = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': AWS_BUCKET_NAME, 'Key': key},
+            ExpiresIn=3600
+        )
+        return redirect(url)
+    except ClientError as e:
+        return f"Error generating download link: {str(e)}", 500
+
+@app.route('/rename', methods=['POST'])
+def rename():
+    s3 = get_s3_client()
+    old_key = request.form.get('old_key')
+    new_key = request.form.get('new_key').strip()
+    
+    if not old_key or not new_key:
+        flash('Missing filenames', 'error')
+        return redirect(url_for('index'))
+        
+    try:
+        # Check if identical
+        if old_key == new_key:
+            flash('New name is same as old name', 'warning')
+            return redirect(url_for('index', prefix=os.path.dirname(old_key)))
+
+        # Handle Folder Rename (Prefix)
+        if old_key.endswith('/'):
+            # Ensure new key also ends with /
+            if not new_key.endswith('/'):
+                new_key += '/'
+                
+            # List all objects in the old folder
+            objects = s3.list_objects_v2(Bucket=AWS_BUCKET_NAME, Prefix=old_key)
+            if 'Contents' in objects:
+                for obj in objects['Contents']:
+                    old_obj_key = obj['Key']
+                    # Replace prefix
+                    new_obj_key = new_key + old_obj_key[len(old_key):]
+                    
+                    # Copy
+                    copy_source = {'Bucket': AWS_BUCKET_NAME, 'Key': old_obj_key}
+                    s3.copy_object(CopySource=copy_source, Bucket=AWS_BUCKET_NAME, Key=new_obj_key)
+                    # Delete
+                    s3.delete_object(Bucket=AWS_BUCKET_NAME, Key=old_obj_key)
+            
+            # Put empty folder marker to accept the move
+            s3.put_object(Bucket=AWS_BUCKET_NAME, Key=new_key)
+            
+            # Also delete average folder marker if it exists
+            s3.delete_object(Bucket=AWS_BUCKET_NAME, Key=old_key)
+
+            flash(f'Folder renamed to {new_key}', 'success')
+            
+        else:
+            # File Rename
+            copy_source = {'Bucket': AWS_BUCKET_NAME, 'Key': old_key}
+            s3.copy_object(CopySource=copy_source, Bucket=AWS_BUCKET_NAME, Key=new_key)
+            s3.delete_object(Bucket=AWS_BUCKET_NAME, Key=old_key)
+            flash(f'Renamed to {new_key}', 'success')
+            
+    except ClientError as e:
+        flash(f'Rename failed: {str(e)}', 'error')
+        
+    # Redirect to the folder of the NEW key
+    new_prefix = os.path.dirname(new_key.rstrip('/'))
+    if new_prefix: new_prefix += '/'
+    else: new_prefix = ''
+    
+    return redirect(url_for('index', prefix=new_prefix))
+
+def configure_cors():
+    """Configures CORS to allow direct browser uploads."""
+    s3 = get_s3_client()
+    try:
+        cors_configuration = {
+            'CORSRules': [{
+                'AllowedHeaders': ['*'],
+                'AllowedMethods': ['GET', 'PUT', 'POST', 'HEAD'],
+                'AllowedOrigins': ['*'],
+                'ExposeHeaders': ['ETag']
+            }]
+        }
+        s3.put_bucket_cors(Bucket=AWS_BUCKET_NAME, CORSConfiguration=cors_configuration)
+        print("✅ CORS configuration successfully applied to bucket.")
+    except ClientError as e:
+        print(f"⚠️ Failed to apply CORS configuration: {e}")
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Check if config is set
+    if 'YOUR_ACCESS_KEY' in AWS_ACCESS_KEY_ID:
+         print("WARNING: AWS Credentials are not set in the script!")
+         print("Please edit s3_manager.py and set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_BUCKET_NAME")
+    
+    # Apply CORS on startup to ensure direct uploads work
+    configure_cors()
+    
+    app.run(host='0.0.0.0', debug=True, port=5000)
