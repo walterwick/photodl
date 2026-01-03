@@ -22,7 +22,7 @@ PROFILES = {
         'bucket_name': 'walter',
         'endpoint_url': 'https://238a54d3f39bc03c25b5550bbd2683ed.r2.cloudflarestorage.com',
         'region': 'auto',
-        'public_url': 'https://walterwick.de/'
+        'public_url': 'https://s3.walterwick.de/'
     }
 }
 DEFAULT_PROFILE = 'bucket1'
