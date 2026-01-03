@@ -1,40 +1,61 @@
 import os
 import boto3
-from flask import Flask, render_template_string, request, redirect, url_for, flash, send_file, Response
+from flask import Flask, render_template_string, request, redirect, url_for, flash, send_file, Response, session
 from botocore.exceptions import ClientError
 import mimetypes
 
 # --- CONFIGURATION ---
-# SECURITY WARNING: NEVER COMMIT ACTUAL CREDENTIALS TO VERSION CONTROL
-# REPLACE THESE VALUES WITH YOUR ACTUAL AWS CREDENTIALS
-# --- CONFIGURATION ---
-# SECURITY WARNING: NEVER COMMIT ACTUAL CREDENTIALS TO VERSION CONTROL
-# REPLACE THESE VALUES WITH YOUR ACTUAL AWS CREDENTIALS
-AWS_ACCESS_KEY_ID = '0a7f0017d897d5b8b982ad26e5711a21'
-AWS_SECRET_ACCESS_KEY = '9125af83e42fbf5237304c13ea46df52bb1aa5557227fa5f15e8df2fe45f9f31'
-AWS_BUCKET_NAME = 'walter'
-AWS_ENDPOINT_URL = 'https://a3855f747521f7ef4cea32514f2279e2.r2.cloudflarestorage.com'
-AWS_REGION = 'auto' # R2 requires a region, 'auto' is usually fine or 'us-east-1'
+PROFILES = {
+    'bucket1': {
+        'name': 'Bucket 1',
+        'access_key_id': '0a7f0017d897d5b8b982ad26e5711a21',
+        'secret_access_key': '9125af83e42fbf5237304c13ea46df52bb1aa5557227fa5f15e8df2fe45f9f31',
+        'bucket_name': 'walter',
+        'endpoint_url': 'https://a3855f747521f7ef4cea32514f2279e2.r2.cloudflarestorage.com',
+        'region': 'auto',
+        'public_url': 'https://pub-4dfa55f23513493caa0be91a20704b4c.r2.dev/'
+    },
+    'bucket2': {
+        'name': 'Bucket 2',
+        'access_key_id': '112b183cdd116461df8ee2d8a647a58c',
+        'secret_access_key': 'dd104010783bf0278926182bb9a1d0496c6f62907241d5f196918d7089fe005d',
+        'bucket_name': 'walter',
+        'endpoint_url': 'https://238a54d3f39bc03c25b5550bbd2683ed.r2.cloudflarestorage.com',
+        'region': 'auto',
+        'public_url': 'https://walterwick.de/'
+    }
+}
+DEFAULT_PROFILE = 'bucket1'
 
 app = Flask(__name__)
+
+def get_active_profile_key():
+    return session.get('active_profile', DEFAULT_PROFILE)
+
+def get_current_config():
+    return PROFILES.get(get_active_profile_key(), PROFILES[DEFAULT_PROFILE])
+
+def get_bucket():
+    return get_current_config()['bucket_name']
 # Increase max upload size to 16GB (default is usually unlimited but good to be explicit or avoid proxy issues)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024 
 app.secret_key = 'super-secret-key-for-flash-messages'
 
 # --- S3 HELPER ---
 def get_s3_client():
+    config = get_current_config()
     return boto3.client(
         's3',
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-        endpoint_url=AWS_ENDPOINT_URL,
-        region_name=AWS_REGION
+        aws_access_key_id=config['access_key_id'],
+        aws_secret_access_key=config['secret_access_key'],
+        endpoint_url=config['endpoint_url'],
+        region_name=config['region']
     )
 
 def list_files(prefix='', continuation_token=''):
     s3 = get_s3_client()
     try:
-        kwargs = {'Bucket': AWS_BUCKET_NAME, 'Prefix': prefix, 'Delimiter': '/'}
+        kwargs = {'Bucket': get_bucket(), 'Prefix': prefix, 'Delimiter': '/'}
         if continuation_token:
             kwargs['ContinuationToken'] = continuation_token
             
@@ -83,12 +104,32 @@ HTML_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>S3 Manager Pro</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'media',
+        theme: {
+          extend: {
+            colors: {
+              slate: {
+                750: '#293548',
+                850: '#151e2e',
+                950: '#020617',
+              }
+            }
+          }
+        }
+      }
+    </script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
         body { font-family: 'Inter', sans-serif; }
         .drag-area { border: 2px dashed #cbd5e1; transition: all 0.3s ease; }
         .drag-area.active { border-color: #3b82f6; background-color: #eff6ff; }
+        @media (prefers-color-scheme: dark) {
+            .drag-area { border-color: #475569; }
+            .drag-area.active { border-color: #3b82f6; background-color: #1e293b; }
+        }
         /* Custom Scrollbar */
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: #f1f1f1; }
@@ -96,10 +137,10 @@ HTML_TEMPLATE = """
         ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
     </style>
 </head>
-<body class="bg-slate-50 text-slate-800 min-h-screen">
+<body class="bg-slate-50 text-slate-800 dark:bg-slate-900 dark:text-slate-200 min-h-screen transition-colors duration-200">
 
     <!-- Top Navigation -->
-    <nav class="bg-white shadow-sm border-b border-slate-200 fixed w-full top-0 z-50">
+    <nav class="bg-white dark:bg-slate-800 shadow-sm border-b border-slate-200 dark:border-slate-700 fixed w-full top-0 z-50 transition-colors duration-200">
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex justify-between h-16">
                 <div class="flex">
@@ -109,9 +150,18 @@ HTML_TEMPLATE = """
                         </a>
                     </div>
                 </div>
-                <div class="flex items-center space-x-4">
-                    <div class="text-xs text-slate-500 bg-slate-100 px-3 py-1 rounded-full">
-                        <i class="fa-solid fa-server mr-1"></i> Bucket: <span class="font-medium text-slate-700">{{ bucket_name }}</span>
+                <div class="flex items-center space-x-4 relative" id="account-dropdown-container">
+                    <button onclick="toggleBucketDropdown()" class="text-xs text-slate-500 bg-slate-100 px-3 py-1 rounded-full hover:bg-slate-200 transition-colors flex items-center focus:outline-none dark:bg-slate-700 dark:text-slate-300 dark:hover:bg-slate-600">
+                        <i class="fa-solid fa-server mr-1"></i> Bucket: <span class="font-medium text-slate-700 dark:text-slate-200 ml-1">{{ current_profile_name }}</span> 
+                        <i class="fa-solid fa-chevron-down ml-2 text-[10px]"></i>
+                    </button>
+                    <div id="bucketMenu" class="hidden absolute right-0 top-full mt-2 w-48 bg-white dark:bg-slate-800 rounded-lg shadow-lg py-2 z-50 border border-slate-100 dark:border-slate-700">
+                        <a href="{{ url_for('set_bucket', name='bucket1') }}" class="block px-4 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 hover:text-blue-600 dark:hover:text-blue-400">
+                            <i class="fa-solid fa-database mr-2 text-slate-400"></i>Bucket 1
+                        </a>
+                        <a href="{{ url_for('set_bucket', name='bucket2') }}" class="block px-4 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 hover:text-blue-600 dark:hover:text-blue-400">
+                            <i class="fa-solid fa-database mr-2 text-slate-400"></i>Bucket 2
+                        </a>
                     </div>
                 </div>
             </div>
@@ -127,8 +177,8 @@ HTML_TEMPLATE = """
             <div class="mb-6">
               {% for category, message in messages %}
                 <div class="p-4 mb-2 rounded-lg shadow-sm border
-                    {% if category == 'error' %} bg-red-50 border-red-200 text-red-700
-                    {% else %} bg-green-50 border-green-200 text-green-700 {% endif %} flex items-center">
+                    {% if category == 'error' %} bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-900/50 text-red-700 dark:text-red-400
+                    {% else %} bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-900/50 text-green-700 dark:text-green-400 {% endif %} flex items-center">
                     <i class="fa-solid {% if category == 'error' %}fa-circle-exclamation{% else %}fa-circle-check{% endif %} mr-2"></i>
                     {{ message }}
                 </div>
@@ -140,8 +190,8 @@ HTML_TEMPLATE = """
         <!-- Actions Bar -->
         <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
             <!-- Breadcrumbs -->
-            <nav class="flex text-slate-500 overflow-x-auto whitespace-nowrap pb-1 md:pb-0">
-                <a href="{{ url_for('index') }}" class="hover:text-blue-600 transition-colors flex items-center">
+            <nav class="flex text-slate-500 dark:text-slate-400 overflow-x-auto whitespace-nowrap pb-1 md:pb-0">
+                <a href="{{ url_for('index') }}" class="hover:text-blue-600 dark:hover:text-blue-400 transition-colors flex items-center">
                     <i class="fa-solid fa-house mr-1"></i> Home
                 </a>
                 {% set parts = prefix.strip('/').split('/') %}
@@ -150,8 +200,8 @@ HTML_TEMPLATE = """
                     {% for part in parts %}
                         {% if part %}
                             {% set current_path.value = current_path.value + part + '/' %}
-                            <span class="mx-2 text-slate-300">/</span>
-                            <a href="{{ url_for('index', prefix=current_path.value) }}" class="font-medium hover:text-blue-600 transition-colors text-slate-700">
+                            <span class="mx-2 text-slate-300 dark:text-slate-600">/</span>
+                            <a href="{{ url_for('index', prefix=current_path.value) }}" class="font-medium hover:text-blue-600 dark:hover:text-blue-400 transition-colors text-slate-700 dark:text-slate-300">
                                 {{ part }}
                             </a>
                         {% endif %}
@@ -160,7 +210,7 @@ HTML_TEMPLATE = """
             </nav>
 
             <div class="flex items-center space-x-2">
-                <button onclick="document.getElementById('newFolderModal').classList.remove('hidden')" class="bg-white border border-slate-300 text-slate-700 px-4 py-2 rounded-lg hover:bg-slate-50 hover:text-blue-600 transition-all text-sm font-medium shadow-sm">
+                <button onclick="document.getElementById('newFolderModal').classList.remove('hidden')" class="bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 text-slate-700 dark:text-slate-200 px-4 py-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-600 hover:text-blue-600 dark:hover:text-blue-400 transition-all text-sm font-medium shadow-sm">
                     <i class="fa-solid fa-folder-plus mr-2"></i>New Folder
                 </button>
                 
@@ -171,11 +221,11 @@ HTML_TEMPLATE = """
                         <i class="fa-solid fa-chevron-down ml-2 text-xs"></i>
                     </button>
                     <!-- Dropdown -->
-                    <div class="hidden group-hover:block absolute right-0 mt-0 w-48 bg-white rounded-md shadow-lg py-1 z-20 border border-slate-100">
-                        <a href="#" onclick="document.getElementById('uploadModal').classList.remove('hidden'); setupUpload('file')" class="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                    <div class="hidden group-hover:block absolute right-0 mt-0 w-48 bg-white dark:bg-slate-800 rounded-md shadow-lg py-1 z-20 border border-slate-100 dark:border-slate-700">
+                        <a href="#" onclick="document.getElementById('uploadModal').classList.remove('hidden'); setupUpload('file')" class="block px-4 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700">
                             <i class="fa-solid fa-file mr-2 text-slate-400"></i> Upload Files
                         </a>
-                        <a href="#" onclick="document.getElementById('uploadModal').classList.remove('hidden'); setupUpload('folder')" class="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                        <a href="#" onclick="document.getElementById('uploadModal').classList.remove('hidden'); setupUpload('folder')" class="block px-4 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700">
                             <i class="fa-solid fa-folder mr-2 text-slate-400"></i> Upload Folder
                         </a>
                     </div>
@@ -184,17 +234,17 @@ HTML_TEMPLATE = """
         </div>
 
         <!-- File Browser -->
-        <div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mb-6">
+        <div class="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden mb-6 transition-colors duration-200">
             {% if not folders and not files %}
-                <div class="p-12 text-center text-slate-400">
-                    <i class="fa-regular fa-folder-open text-6xl mb-4 text-slate-200"></i>
+                <div class="p-12 text-center text-slate-400 dark:text-slate-500">
+                    <i class="fa-regular fa-folder-open text-6xl mb-4 text-slate-200 dark:text-slate-700"></i>
                     <p class="text-lg">This folder is empty</p>
                     <p class="text-sm mt-2">Upload files or create a new folder to get started.</p>
                 </div>
             {% else %}
                 <div class="overflow-x-auto">
-                    <table class="w-full text-left text-sm text-slate-600">
-                        <thead class="bg-slate-50 text-xs uppercase font-semibold text-slate-500 border-b border-slate-200">
+                    <table class="w-full text-left text-sm text-slate-600 dark:text-slate-300">
+                        <thead class="bg-slate-50 dark:bg-slate-750 text-xs uppercase font-semibold text-slate-500 dark:text-slate-400 border-b border-slate-200 dark:border-slate-700">
                             <tr>
                                 <th class="px-6 py-4 rounded-tl-lg">Name</th>
                                 <th class="px-6 py-4">Size</th>
@@ -202,12 +252,12 @@ HTML_TEMPLATE = """
                                 <th class="px-6 py-4 text-right rounded-tr-lg">Actions</th>
                             </tr>
                         </thead>
-                        <tbody class="divide-y divide-slate-100">
+                        <tbody class="divide-y divide-slate-100 dark:divide-slate-700">
                             <!-- Folders -->
                             {% for folder in folders %}
-                            <tr class="hover:bg-slate-50 transition-colors group">
+                            <tr class="hover:bg-slate-50 dark:hover:bg-slate-750 transition-colors group border-b border-slate-100 dark:border-slate-700 last:border-0">
                                 <td class="px-6 py-3 whitespace-nowrap cursor-pointer" onclick="window.location.href='{{ url_for('index', prefix=folder.path) }}'">
-                                    <div class="flex items-center text-slate-700 font-medium">
+                                    <div class="flex items-center text-slate-700 dark:text-slate-200 font-medium">
                                         <i class="fa-solid fa-folder text-yellow-400 text-2xl mr-3"></i>
                                         {{ folder.name }}
                                     </div>
@@ -231,11 +281,12 @@ HTML_TEMPLATE = """
 
                             <!-- Files -->
                             {% for file in files %}
-                            <tr class="hover:bg-slate-50 transition-colors group">
-                                <td class="px-6 py-3 font-medium text-slate-700">
+                            <tr class="hover:bg-slate-50 dark:hover:bg-slate-750 transition-colors group border-b border-slate-100 dark:border-slate-700 last:border-0">
+                                <td class="px-6 py-3 font-medium text-slate-700 dark:text-slate-200">
                                     <div class="flex items-center space-x-3">
                                         <!-- Preview Click -->
-                                        <button onclick="openPreview('{{ file.path }}', '{{ file.name }}')" class="w-8 h-8 rounded-lg bg-slate-100 text-slate-500 hover:text-blue-600 hover:bg-blue-50 flex items-center justify-center text-lg transition-colors" title="Preview">
+                                        <!-- Preview Click -->
+                                        <button onclick="openPreview('{{ file.path }}', '{{ file.name }}')" class="w-8 h-8 rounded-lg bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 flex items-center justify-center text-lg transition-colors" title="Preview">
                                            {% if file.name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')) %} 
                                                 <i class="fa-regular fa-image"></i>
                                            {% elif file.name.lower().endswith(('.pdf')) %}
@@ -248,7 +299,7 @@ HTML_TEMPLATE = """
                                         </button>
                                         
                                         <!-- New Tab Click -->
-                                        <button onclick="openInNewTab('{{ file.path }}')" class="hover:text-blue-600 hover:underline text-left">
+                                        <button onclick="openInNewTab('{{ file.path }}')" class="hover:text-blue-600 dark:hover:text-blue-400 hover:underline text-left">
                                             {{ file.name }}
                                         </button>
                                     </div>
@@ -296,24 +347,24 @@ HTML_TEMPLATE = """
         <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
             <div class="fixed inset-0 bg-slate-900 bg-opacity-75 transition-opacity" aria-hidden="true" onclick="handleModalClose()"></div>
             <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-            <div class="inline-block align-bottom bg-white rounded-xl text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
-                <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
-                    <h3 class="text-lg leading-6 font-medium text-slate-900 mb-4" id="uploadModalTitle">Upload File</h3>
+            <div class="inline-block align-bottom bg-white dark:bg-slate-800 rounded-xl text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+                <div class="bg-white dark:bg-slate-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                    <h3 class="text-lg leading-6 font-medium text-slate-900 dark:text-white mb-4" id="uploadModalTitle">Upload File</h3>
                     
                     <!-- Custom Path Input -->
                     <div class="mb-4">
-                        <label class="block text-xs font-medium text-slate-500 uppercase mb-1">Upload To (Folder Path)</label>
+                        <label class="block text-xs font-medium text-slate-500 dark:text-slate-400 uppercase mb-1">Upload To (Folder Path)</label>
                         <div class="relative rounded-md shadow-sm">
                             <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                                 <span class="text-slate-400 sm:text-sm">/</span>
                             </div>
-                            <input type="text" id="targetPathInput" class="focus:ring-blue-500 focus:border-blue-500 block w-full pl-7 sm:text-sm border-slate-300 rounded-md border p-2" placeholder="folder/subfolder">
+                            <input type="text" id="targetPathInput" class="focus:ring-blue-500 focus:border-blue-500 block w-full pl-7 sm:text-sm border-slate-300 dark:border-slate-600 rounded-md border p-2 bg-white dark:bg-slate-700 text-slate-900 dark:text-white placeholder-slate-400" placeholder="folder/subfolder">
                         </div>
                         <p class="text-xs text-slate-400 mt-1">Leave empty for root, or type a folder path (e.g. 'images/2024'). Will be created if it doesn't exist.</p>
                     </div>
 
                     <div id="uploadUi">
-                        <div class="drag-area w-full h-40 rounded-xl bg-slate-50 flex flex-col items-center justify-center text-slate-400 mb-4 cursor-pointer relative" id="dragArea">
+                        <div class="drag-area w-full h-40 rounded-xl bg-slate-50 dark:bg-slate-700/50 flex flex-col items-center justify-center text-slate-400 dark:text-slate-500 mb-4 cursor-pointer relative" id="dragArea">
                             <input type="file" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" id="fileInput" onchange="filesSelected(this)" multiple>
                             <i class="fa-solid fa-cloud-arrow-up text-4xl mb-2"></i>
                             <p class="text-sm font-medium" id="dropText">Drag & Drop or Click to Browse</p>
@@ -322,13 +373,13 @@ HTML_TEMPLATE = """
                     </div>
                     
                     <!-- Total Progress -->
-                    <div id="totalProgress" class="hidden mb-6 bg-blue-50 p-4 rounded-xl border border-blue-100">
-                        <div class="flex justify-between text-sm font-bold text-blue-900 mb-2">
+                    <div id="totalProgress" class="hidden mb-6 bg-blue-50 dark:bg-blue-900/20 p-4 rounded-xl border border-blue-100 dark:border-blue-900/30">
+                        <div class="flex justify-between text-sm font-bold text-blue-900 dark:text-blue-300 mb-2">
                             <span id="totalText">Preparing...</span>
                             <span id="totalPercent">0%</span>
                         </div>
-                        <div class="w-full bg-blue-200 rounded-full h-3">
-                            <div id="totalBar" class="bg-blue-600 h-3 rounded-full transition-all duration-300 shadow-sm" style="width: 0%"></div>
+                        <div class="w-full bg-blue-200 dark:bg-blue-900/40 rounded-full h-3">
+                            <div id="totalBar" class="bg-blue-600 dark:bg-blue-500 h-3 rounded-full transition-all duration-300 shadow-sm" style="width: 0%"></div>
                         </div>
                     </div>
 
@@ -341,7 +392,7 @@ HTML_TEMPLATE = """
                         <button type="button" id="startUploadBtn" class="hidden w-full inline-flex justify-center rounded-lg border border-transparent shadow-sm px-4 py-2 bg-green-600 text-base font-medium text-white hover:bg-green-700 focus:outline-none sm:col-start-2 sm:text-sm" onclick="startUpload()">
                             Start Upload
                         </button>
-                        <button type="button" id="closeBtn" class="w-full inline-flex justify-center rounded-lg border border-slate-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-slate-700 hover:bg-slate-50 focus:outline-none sm:col-start-1 sm:text-sm" onclick="handleModalClose()">
+                        <button type="button" id="closeBtn" class="w-full inline-flex justify-center rounded-lg border border-slate-300 dark:border-slate-600 shadow-sm px-4 py-2 bg-white dark:bg-slate-700 text-base font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-600 focus:outline-none sm:col-start-1 sm:text-sm" onclick="handleModalClose()">
                             Close
                         </button>
                     </div>
@@ -355,21 +406,21 @@ HTML_TEMPLATE = """
         <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
             <div class="fixed inset-0 bg-slate-900 bg-opacity-75" onclick="document.getElementById('renameModal').classList.add('hidden')"></div>
             <span class="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
-            <div class="inline-block align-bottom bg-white rounded-xl text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
-                <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
-                    <h3 class="text-lg leading-6 font-medium text-slate-900 mb-4">Rename / Move File</h3>
+            <div class="inline-block align-bottom bg-white dark:bg-slate-800 rounded-xl text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+                <div class="bg-white dark:bg-slate-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                    <h3 class="text-lg leading-6 font-medium text-slate-900 dark:text-white mb-4">Rename / Move File</h3>
                     <form action="{{ url_for('rename') }}" method="POST">
                         <input type="hidden" name="old_key" id="renameOldKey">
                         <div class="mb-4">
-                            <label for="renameNewKey" class="block text-sm font-medium text-slate-700 mb-2">New Path (Folder + Filename)</label>
-                            <input type="text" name="new_key" id="renameNewKey" class="shadow-sm focus:ring-blue-500 focus:border-blue-500 block w-full sm:text-sm border-slate-300 rounded-md p-2 border font-mono text-sm" required>
-                            <p class="text-xs text-slate-500 mt-2">Example: <code>folder/newname.jpg</code> or just <code>newname.jpg</code> to move to root.</p>
+                            <label for="renameNewKey" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">New Path (Folder + Filename)</label>
+                            <input type="text" name="new_key" id="renameNewKey" class="shadow-sm focus:ring-blue-500 focus:border-blue-500 block w-full sm:text-sm border-slate-300 dark:border-slate-600 rounded-md p-2 border font-mono text-sm bg-white dark:bg-slate-700 text-slate-900 dark:text-white" required>
+                            <p class="text-xs text-slate-500 dark:text-slate-400 mt-2">Example: <code>folder/newname.jpg</code> or just <code>newname.jpg</code> to move to root.</p>
                         </div>
                         <div class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                             <button type="submit" class="w-full inline-flex justify-center rounded-lg border border-transparent shadow-sm px-4 py-2 bg-orange-600 text-base font-medium text-white hover:bg-orange-700 focus:outline-none sm:col-start-2 sm:text-sm">
                                 Rename / Move
                             </button>
-                            <button type="button" class="mt-3 w-full inline-flex justify-center rounded-lg border border-slate-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-slate-700 hover:bg-slate-50 focus:outline-none sm:mt-0 sm:col-start-1 sm:text-sm" onclick="document.getElementById('renameModal').classList.add('hidden')">
+                            <button type="button" class="mt-3 w-full inline-flex justify-center rounded-lg border border-slate-300 dark:border-slate-600 shadow-sm px-4 py-2 bg-white dark:bg-slate-700 text-base font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-600 focus:outline-none sm:mt-0 sm:col-start-1 sm:text-sm" onclick="document.getElementById('renameModal').classList.add('hidden')">
                                 Cancel
                             </button>
                         </div>
@@ -394,15 +445,24 @@ HTML_TEMPLATE = """
                     <i class="fa-solid fa-chevron-right"></i>
                  </button>
 
-                <div class="relative bg-white rounded-lg overflow-hidden">
-                    <div class="flex justify-between items-center p-4 border-b border-slate-200 bg-slate-50">
-                        <h3 class="text-lg font-medium text-slate-900 truncate pr-4" id="previewTitle">File Preview</h3>
-                        <button type="button" class="text-slate-400 hover:text-slate-500 focus:outline-none" onclick="closePreview()">
-                            <span class="sr-only">Close</span>
-                           <i class="fa-solid fa-xmark text-xl"></i>
-                        </button>
+                <div class="relative bg-white dark:bg-slate-800 rounded-lg overflow-hidden">
+                    <div class="flex justify-between items-center p-4 border-b border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-750">
+                        <h3 class="text-lg font-medium text-slate-900 dark:text-white truncate pr-4 flex-1" id="previewTitle">File Preview</h3>
+                        <div class="flex items-center space-x-2">
+                             <a href="#" id="previewOpenBtn" target="_blank" class="text-slate-400 hover:text-blue-600 px-3 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors" title="Open in New Tab">
+                                <i class="fa-solid fa-arrow-up-right-from-square"></i>
+                            </a>
+                            <button type="button" onclick="deleteCurrentPreview()" class="text-slate-400 hover:text-red-500 px-3 py-1 rounded hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors" title="Delete File">
+                                <i class="fa-regular fa-trash-can"></i>
+                            </button>
+                            <div class="w-px h-6 bg-slate-200 dark:bg-slate-600 mx-1"></div>
+                            <button type="button" class="text-slate-400 hover:text-slate-500 dark:hover:text-slate-300 focus:outline-none" onclick="closePreview()">
+                                <span class="sr-only">Close</span>
+                               <i class="fa-solid fa-xmark text-xl"></i>
+                            </button>
+                        </div>
                     </div>
-                    <div class="p-4 bg-slate-100 flex justify-center items-center min-h-[300px] max-h-[80vh] overflow-auto" id="previewContent">
+                    <div class="p-4 bg-slate-100 dark:bg-slate-900 flex justify-center items-center min-h-[300px] max-h-[80vh] overflow-auto" id="previewContent">
                         <!-- Content injected by JS -->
                         <i class="fa-solid fa-circle-notch fa-spin text-4xl text-blue-500"></i>
                     </div>
@@ -416,20 +476,20 @@ HTML_TEMPLATE = """
         <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
             <div class="fixed inset-0 bg-slate-900 bg-opacity-75" onclick="document.getElementById('newFolderModal').classList.add('hidden')"></div>
             <span class="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
-            <div class="inline-block align-bottom bg-white rounded-xl text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
-                <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
-                    <h3 class="text-lg leading-6 font-medium text-slate-900 mb-4">Create New Folder</h3>
+            <div class="inline-block align-bottom bg-white dark:bg-slate-800 rounded-xl text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+                <div class="bg-white dark:bg-slate-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                    <h3 class="text-lg leading-6 font-medium text-slate-900 dark:text-white mb-4">Create New Folder</h3>
                     <form action="{{ url_for('mkdir') }}" method="POST">
                         <input type="hidden" name="prefix" value="{{ prefix }}">
                         <div class="mb-4">
-                            <label for="folderName" class="block text-sm font-medium text-slate-700 mb-2">Folder Name</label>
-                            <input type="text" name="folder_name" id="folderName" class="shadow-sm focus:ring-blue-500 focus:border-blue-500 block w-full sm:text-sm border-slate-300 rounded-md p-2 border" placeholder="e.g., images" required>
+                            <label for="folderName" class="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Folder Name</label>
+                            <input type="text" name="folder_name" id="folderName" class="shadow-sm focus:ring-blue-500 focus:border-blue-500 block w-full sm:text-sm border-slate-300 dark:border-slate-600 rounded-md p-2 border bg-white dark:bg-slate-700 text-slate-900 dark:text-white placeholder-slate-400" placeholder="e.g., images" required>
                         </div>
                         <div class="mt-5 sm:mt-6 sm:grid sm:grid-cols-2 sm:gap-3 sm:grid-flow-row-dense">
                             <button type="submit" class="w-full inline-flex justify-center rounded-lg border border-transparent shadow-sm px-4 py-2 bg-blue-600 text-base font-medium text-white hover:bg-blue-700 focus:outline-none sm:col-start-2 sm:text-sm">
                                 Create
                             </button>
-                            <button type="button" class="mt-3 w-full inline-flex justify-center rounded-lg border border-slate-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-slate-700 hover:bg-slate-50 focus:outline-none sm:mt-0 sm:col-start-1 sm:text-sm" onclick="document.getElementById('newFolderModal').classList.add('hidden')">
+                            <button type="button" class="mt-3 w-full inline-flex justify-center rounded-lg border border-slate-300 dark:border-slate-600 shadow-sm px-4 py-2 bg-white dark:bg-slate-700 text-base font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-600 focus:outline-none sm:mt-0 sm:col-start-1 sm:text-sm" onclick="document.getElementById('newFolderModal').classList.add('hidden')">
                                 Cancel
                             </button>
                         </div>
@@ -458,6 +518,21 @@ HTML_TEMPLATE = """
         let isUploading = false; // Flag to check if start button pressed
 
         // --- INIT ---
+        function toggleBucketDropdown() {
+             const menu = document.getElementById('bucketMenu');
+             menu.classList.toggle('hidden');
+        }
+        
+        window.addEventListener('click', function(e) {
+            const container = document.getElementById('account-dropdown-container');
+            const menu = document.getElementById('bucketMenu');
+            if (container && !container.contains(e.target)) {
+                 if (menu && !menu.classList.contains('hidden')) {
+                    menu.classList.add('hidden');
+                 }
+            }
+        });
+
         document.addEventListener('DOMContentLoaded', () => {
              setupInfiniteScroll();
              setupPaste();
@@ -893,6 +968,7 @@ HTML_TEMPLATE = """
         // --- PREVIEW NAVIGATION ---
         let previewFilesList = [];
         let currentPreviewIndex = -1;
+        let currentPreviewKey = null; // Track current key for actions
         let touchStartX = 0;
         let touchEndX = 0;
 
@@ -963,15 +1039,22 @@ HTML_TEMPLATE = """
         }
         
         async function loadPreviewContent(key, name) {
+            currentPreviewKey = key;
             document.getElementById('previewTitle').textContent = name;
             const content = document.getElementById('previewContent');
+            const openBtn = document.getElementById('previewOpenBtn');
+            
             content.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin text-4xl text-blue-500"></i>';
+            openBtn.href = '#'; // Reset
             
             try {
+                // Request SIGNED link for preview (default behavior now)
                 const response = await fetch(`/get_link?key=${encodeURIComponent(key)}`);
                 const data = await response.json();
                 
                 if (data.url) {
+                    openBtn.href = data.url; // Set open button link
+                    
                     const ext = name.split('.').pop().toLowerCase();
                     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) {
                         content.innerHTML = `<img src="${data.url}" class="max-w-full max-h-[70vh] rounded shadow-lg select-none" draggable="false">`;
@@ -999,12 +1082,37 @@ HTML_TEMPLATE = """
         function closePreview() {
             document.getElementById('previewModal').classList.add('hidden');
             document.getElementById('previewContent').innerHTML = ''; 
+            currentPreviewKey = null;
+        }
+
+        async function deleteCurrentPreview() {
+            if (!currentPreviewKey) return;
+            if (!confirm('Are you sure you want to delete this file?')) return;
+            
+            const formData = new FormData();
+            formData.append('key', currentPreviewKey);
+            
+            try {
+                const res = await fetch('/delete', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (res.ok) {
+                    window.location.reload();
+                } else {
+                    alert('Failed to delete file');
+                }
+            } catch (e) {
+                alert('Error deleting file');
+            }
         }
 
         // Feature: Copy Link
         async function copyLink(key) {
             try {
-                const response = await fetch(`/get_link?key=${encodeURIComponent(key)}`);
+                // EXPLICITLY ask for public link
+                const response = await fetch(`/get_link?key=${encodeURIComponent(key)}&public=true`);
                 const data = await response.json();
                 
                 if (data.url) {
@@ -1044,6 +1152,12 @@ HTML_TEMPLATE = """
 
 # --- ROUTES ---
 
+@app.route('/set_bucket/<name>')
+def set_bucket(name):
+    if name in PROFILES:
+        session['active_profile'] = name
+    return redirect(url_for('index'))
+
 @app.route('/')
 def index():
     prefix = request.args.get('prefix', '')
@@ -1059,7 +1173,8 @@ def index():
                                   files=files, 
                                   prefix=prefix, 
                                   next_token=next_token,
-                                  bucket_name=AWS_BUCKET_NAME)
+                                  bucket_name=get_bucket(),
+                                  current_profile_name=get_current_config()['name'])
 
 @app.route('/get_upload_link', methods=['POST'])
 def get_upload_link():
@@ -1075,7 +1190,7 @@ def get_upload_link():
     
     print(f"DEBUG: Checking key='{key}'")
     try:
-        s3.head_object(Bucket=AWS_BUCKET_NAME, Key=key)
+        s3.head_object(Bucket=get_bucket(), Key=key)
         print(f"DEBUG: Found existing key='{key}'")
         return {"error": "File already exists", "exists": True}, 409
     except ClientError as e:
@@ -1094,7 +1209,7 @@ def get_upload_link():
         url = s3.generate_presigned_url(
             'put_object',
             Params={
-                'Bucket': AWS_BUCKET_NAME, 
+                'Bucket': get_bucket(), 
                 'Key': key,
                 'ContentType': content_type
             },
@@ -1106,21 +1221,32 @@ def get_upload_link():
 
 @app.route('/get_link')
 def get_link():
-    s3 = get_s3_client()
     key = request.args.get('key')
+    want_public = request.args.get('public') == 'true'
     
     if not key:
         return {"error": "Missing key"}, 400
         
-    try:
-        url = s3.generate_presigned_url(
-            'get_object',
-            Params={'Bucket': AWS_BUCKET_NAME, 'Key': key},
-            ExpiresIn=3600 * 24
-        )
-        return {"url": url}
-    except ClientError as e:
-        return {"error": str(e)}, 500
+    # Use Public URL ONLY if requested and available
+    public_url = get_current_config().get('public_url')
+    if want_public and public_url:
+        # Ensure trailing slash on public url and no leading slash on key
+        base = public_url.rstrip('/')
+        clean_key = key.lstrip('/')
+        url = f"{base}/{clean_key}"
+    else:
+        # Default to PRESIGNED URL for everything else (Preview, Open, Download)
+        s3 = get_s3_client()
+        try:
+            url = s3.generate_presigned_url(
+                'get_object',
+                Params={'Bucket': get_bucket(), 'Key': key},
+                ExpiresIn=3600 * 24
+            )
+        except ClientError as e:
+            return {"error": str(e)}, 500
+
+    return {"url": url}
 
 @app.route('/mkdir', methods=['POST'])
 def mkdir():
@@ -1137,7 +1263,7 @@ def mkdir():
         
     try:
         key = prefix + folder_name
-        s3.put_object(Bucket=AWS_BUCKET_NAME, Key=key)
+        s3.put_object(Bucket=get_bucket(), Key=key)
         flash(f'Folder {folder_name} created!', 'success')
     except ClientError as e:
         flash(f'Folder creation failed: {str(e)}', 'error')
@@ -1156,12 +1282,12 @@ def delete():
         
     try:
         if key.endswith('/'):
-            objects_to_delete = s3.list_objects_v2(Bucket=AWS_BUCKET_NAME, Prefix=key)
+            objects_to_delete = s3.list_objects_v2(Bucket=get_bucket(), Prefix=key)
             if 'Contents' in objects_to_delete:
                 delete_keys = [{'Key': obj['Key']} for obj in objects_to_delete['Contents']]
-                s3.delete_objects(Bucket=AWS_BUCKET_NAME, Delete={'Objects': delete_keys})
+                s3.delete_objects(Bucket=get_bucket(), Delete={'Objects': delete_keys})
         else:
-            s3.delete_object(Bucket=AWS_BUCKET_NAME, Key=key)
+            s3.delete_object(Bucket=get_bucket(), Key=key)
             
         flash(f'Item deleted successfully', 'success')
     except ClientError as e:
@@ -1171,16 +1297,16 @@ def delete():
 
 @app.route('/download')
 def download():
-    s3 = get_s3_client()
     key = request.args.get('key')
     
     if not key:
         return "Missing key", 400
         
+    s3 = get_s3_client()
     try:
         url = s3.generate_presigned_url(
             'get_object',
-            Params={'Bucket': AWS_BUCKET_NAME, 'Key': key},
+            Params={'Bucket': get_bucket(), 'Key': key},
             ExpiresIn=3600
         )
         return redirect(url)
@@ -1210,7 +1336,7 @@ def rename():
                 new_key += '/'
                 
             # List all objects in the old folder
-            objects = s3.list_objects_v2(Bucket=AWS_BUCKET_NAME, Prefix=old_key)
+            objects = s3.list_objects_v2(Bucket=get_bucket(), Prefix=old_key)
             if 'Contents' in objects:
                 for obj in objects['Contents']:
                     old_obj_key = obj['Key']
@@ -1218,24 +1344,24 @@ def rename():
                     new_obj_key = new_key + old_obj_key[len(old_key):]
                     
                     # Copy
-                    copy_source = {'Bucket': AWS_BUCKET_NAME, 'Key': old_obj_key}
-                    s3.copy_object(CopySource=copy_source, Bucket=AWS_BUCKET_NAME, Key=new_obj_key)
+                    copy_source = {'Bucket': get_bucket(), 'Key': old_obj_key}
+                    s3.copy_object(CopySource=copy_source, Bucket=get_bucket(), Key=new_obj_key)
                     # Delete
-                    s3.delete_object(Bucket=AWS_BUCKET_NAME, Key=old_obj_key)
+                    s3.delete_object(Bucket=get_bucket(), Key=old_obj_key)
             
             # Put empty folder marker to accept the move
-            s3.put_object(Bucket=AWS_BUCKET_NAME, Key=new_key)
+            s3.put_object(Bucket=get_bucket(), Key=new_key)
             
             # Also delete average folder marker if it exists
-            s3.delete_object(Bucket=AWS_BUCKET_NAME, Key=old_key)
+            s3.delete_object(Bucket=get_bucket(), Key=old_key)
 
             flash(f'Folder renamed to {new_key}', 'success')
             
         else:
             # File Rename
-            copy_source = {'Bucket': AWS_BUCKET_NAME, 'Key': old_key}
-            s3.copy_object(CopySource=copy_source, Bucket=AWS_BUCKET_NAME, Key=new_key)
-            s3.delete_object(Bucket=AWS_BUCKET_NAME, Key=old_key)
+            copy_source = {'Bucket': get_bucket(), 'Key': old_key}
+            s3.copy_object(CopySource=copy_source, Bucket=get_bucket(), Key=new_key)
+            s3.delete_object(Bucket=get_bucket(), Key=old_key)
             flash(f'Renamed to {new_key}', 'success')
             
     except ClientError as e:
@@ -1249,28 +1375,42 @@ def rename():
     return redirect(url_for('index', prefix=new_prefix))
 
 def configure_cors():
-    """Configures CORS to allow direct browser uploads."""
-    s3 = get_s3_client()
-    try:
-        cors_configuration = {
-            'CORSRules': [{
-                'AllowedHeaders': ['*'],
-                'AllowedMethods': ['GET', 'PUT', 'POST', 'HEAD'],
-                'AllowedOrigins': ['*'],
-                'ExposeHeaders': ['ETag']
-            }]
-        }
-        s3.put_bucket_cors(Bucket=AWS_BUCKET_NAME, CORSConfiguration=cors_configuration)
-        print("✅ CORS configuration successfully applied to bucket.")
-    except ClientError as e:
-        print(f"⚠️ Failed to apply CORS configuration: {e}")
+    """Configures CORS to allow direct browser uploads for all configured buckets."""
+    configured_buckets = set()
+    
+    for profile_key, config in PROFILES.items():
+        bucket_name = config['bucket_name']
+        if bucket_name in configured_buckets:
+            continue
+            
+        try:
+            print(f"Configuring CORS for bucket '{bucket_name}' (via {profile_key})...")
+            # Create a dedicated client for this setup to avoid session dependency
+            s3 = boto3.client(
+                's3',
+                aws_access_key_id=config['access_key_id'],
+                aws_secret_access_key=config['secret_access_key'],
+                endpoint_url=config['endpoint_url'],
+                region_name=config['region']
+            )
+            
+            cors_configuration = {
+                'CORSRules': [{
+                    'AllowedHeaders': ['*'],
+                    'AllowedMethods': ['GET', 'PUT', 'POST', 'HEAD'],
+                    'AllowedOrigins': ['*'],
+                    'ExposeHeaders': ['ETag']
+                }]
+            }
+            s3.put_bucket_cors(Bucket=bucket_name, CORSConfiguration=cors_configuration)
+            print(f"✅ CORS configuration successfully applied to bucket {bucket_name}.")
+            configured_buckets.add(bucket_name)
+        except ClientError as e:
+            print(f"⚠️ Failed to apply CORS configuration to {bucket_name}: {e}")
+        except Exception as e:
+            print(f"⚠️ Unexpected error configuring CORS for {bucket_name}: {e}")
 
 if __name__ == '__main__':
-    # Check if config is set
-    if 'YOUR_ACCESS_KEY' in AWS_ACCESS_KEY_ID:
-         print("WARNING: AWS Credentials are not set in the script!")
-         print("Please edit s3_manager.py and set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_BUCKET_NAME")
-    
     # Apply CORS on startup to ensure direct uploads work
     configure_cors()
     
